@@ -1,0 +1,14 @@
+# Repository tests also inspect build scripts, documentation, and source identity.
+# Keep these test-only inputs and Git out of the deployed API/worker images.
+ARG API_IMAGE
+FROM ${API_IMAGE}
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY . .
+RUN chown -R 10001:10001 /app && chmod -R u+rwX,go+rX /app
+USER 10001:10001
+
+CMD ["python", "-m", "pytest", "backend/tests", "-q", "-p", "no:cacheprovider"]

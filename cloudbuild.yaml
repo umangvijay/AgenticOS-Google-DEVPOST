@@ -34,4 +34,3 @@ images:
 substitutions:
   _API_IMAGE: 'gcr.io/${PROJECT_ID}/agentos-api'
   _WORKER_IMAGE: 'gcr.io/${PROJECT_ID}/agentos-worker'
-  _REGION: 'us-central1'

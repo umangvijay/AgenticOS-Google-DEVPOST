@@ -40,7 +40,6 @@ gcloud config set project "${PROJECT_ID}" >/dev/null
 # ── 1. Build backend images from source (Cloud Build, per cloudbuild.yaml) ──
 echo "── Building API + worker images (Cloud Build) ──"
 gcloud builds submit --config=cloudbuild.yaml \
-  --substitutions="_REGION=${REGION}" \
   --project="${PROJECT_ID}" .
 
 API_IMAGE="gcr.io/${PROJECT_ID}/agentos-api:latest"

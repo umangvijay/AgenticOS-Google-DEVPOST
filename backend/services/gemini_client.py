@@ -128,9 +128,9 @@ async def probe_key_status() -> dict:
 FLASH_MODELS = (
     "gemini-3.8-flash",
     "gemini-3.7-flash",
-    "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
 )
 
 
@@ -255,6 +255,18 @@ def _client():
 
 async def _generate_content_async(client, **kwargs):
     """Run the sync Gemini SDK off the event loop so workflows can still be polled."""
+    # Gemini 4 does not use sampling controls. Copy rather than mutate a caller's
+    # config; preserve JSON schemas, tools and the original conversation parts
+    # (including thought signatures) for the SDK to serialize.
+    if str(kwargs.get("model", "")).startswith("gemini-4-"):
+        config = kwargs.get("config")
+        if config is not None:
+            sampling_fields = {"temperature": None, "top_p": None, "top_k": None}
+            if isinstance(config, dict):
+                kwargs["config"] = {k: v for k, v in config.items()
+                                    if k not in sampling_fields}
+            else:
+                kwargs["config"] = config.model_copy(update=sampling_fields)
     return await asyncio.to_thread(client.models.generate_content, **kwargs)
 
 

@@ -1,5 +1,6 @@
 import os
-import shlex
+import shutil
+from backend.config.settings import settings
 from typing import List, Dict, Tuple
 from backend.models.mcp_schemas import MCPManifest
 from backend.mcp.sandbox.audit_logger import audit_logger
@@ -25,6 +26,13 @@ class SandboxController:
         secure Docker container.
         """
         
+        if settings.APP_ENV == "production":
+            raise RuntimeError("STDIO connectors require a dedicated isolated runner; this Cloud Run process supports declarative HTTP adapters")
+        if not shutil.which("docker"):
+            raise RuntimeError("STDIO connectors require Docker; no sandbox runtime is available")
+        args = list(args)
+        python_command = os.path.basename(command) in ("python", "python3", "python3.11", "python3.12", "python3.13", "python3.14")
+
         # Base docker constraints
         # -i: Interactive (needed for stdio)
         # --rm: Ephemeral, delete container after exit
@@ -44,6 +52,9 @@ class SandboxController:
             "--rm",
             "--network=none",
             "--read-only",
+            "--cap-drop=ALL",
+            "--pids-limit=64",
+            "--tmpfs=/tmp:rw,noexec,nosuid,size=16m",
             "--security-opt=no-new-privileges",
             "--user", "nobody",
             f"--memory={memory_limit}",
@@ -54,7 +65,7 @@ class SandboxController:
         # and mount it read-only.
         # If the command is just `python`, and args[0] is the script:
         script_path = None
-        if command.endswith("python") and args:
+        if python_command and args:
             script_path = args[0]
         elif os.path.exists(command):
             script_path = command
@@ -70,7 +81,7 @@ class SandboxController:
             docker_args.append("/app")
             
             # Reconstruct the command inside container
-            if command.endswith("python"):
+            if python_command:
                 command = "python3" # Explicitly use python3 inside container
                 args.insert(0, "-u")
                 args[1] = os.path.basename(script_path)
@@ -93,6 +104,6 @@ class SandboxController:
         docker_args.append(command)
         docker_args.extend(args)
         
-        audit_logger.log_sandbox_execution(manifest.mcp_id, "unknown", f"docker {' '.join(docker_args)}")
+        audit_logger.log_sandbox_execution(manifest.mcp_id, "unknown", "docker sandbox (arguments and environment redacted)")
         
         return "docker", docker_args

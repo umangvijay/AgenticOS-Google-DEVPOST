@@ -28,13 +28,16 @@ export default function BlogPage() {
   // Fetch blogs on mount
   useEffect(() => {
     fetch("/api/blogs")
-      .then((res) => res.json())
+      .then(async (res) => {
+        if (!res.ok) throw new Error("Posts are temporarily unavailable. Please try again later.");
+        return res.json();
+      })
       .then((data) => {
         setPosts(Array.isArray(data) && data.length ? data : []);
         setLoading(false);
       })
       .catch((err) => {
-        console.error("Failed to load blogs", err);
+        setError(err instanceof Error ? err.message : "Could not load posts");
         setLoading(false);
       });
   }, []);
@@ -67,14 +70,14 @@ export default function BlogPage() {
       setIsModalOpen(false);
       setTitle("");
       setExcerpt("");
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to post blog");
     } finally {
       setSubmitting(false);
     }
   };
 
-  const isGoogleUser = isAuthenticated && user?.auth_provider === "google";
+  const canPublish = isAuthenticated && ["admin", "super_admin"].includes(user?.role || "");
 
   return (
     <div className="mesh-gradient" style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
@@ -85,17 +88,17 @@ export default function BlogPage() {
           
           <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-12 mt-4">
             <div className="text-left">
-              <h1 className="text-4xl md:text-5xl font-extrabold mb-4 gradient-text">
-                AgentOS Blog
+              <h1 className="text-4xl md:text-5xl font-extrabold mb-4" style={{ fontFamily: "var(--font-serif)", fontWeight: 500, letterSpacing: "-.03em" }}>
+                From the <em>drafting board.</em>
               </h1>
               <p className="text-lg md:text-xl text-[var(--text-secondary)] max-w-2xl">
-                The latest news, engineering insights, and updates from the AgentOS team and community.
+                The latest news, engineering insights, and updates from the Sandtable team and community.
               </p>
             </div>
             
-            {/* The Google-Restricted Create Button */}
+            {/* Publishing is restricted to administrators */}
             <div>
-              {isGoogleUser ? (
+              {canPublish ? (
                 <button 
                   onClick={() => setIsModalOpen(true)}
                   className="btn btn-primary"
@@ -115,19 +118,20 @@ export default function BlogPage() {
                     </svg>
                     Create Post (Locked)
                   </button>
-                  <span style={{ fontSize: 13, color: "var(--text-tertiary)" }}>Requires Google Auth</span>
+                  <span style={{ fontSize: 13, color: "var(--text-tertiary)" }}>Administrator access required</span>
                 </div>
               )}
             </div>
           </div>
 
+          {error && !isModalOpen && <p role="alert" style={{ color: "var(--error)", marginBottom: 20 }}>{error}</p>}
           {/* Blog Grid (Block Content) */}
           {loading ? (
             <div style={{ display: "flex", justifyContent: "center", padding: 64 }}>
               <div className="spinner" style={{ width: 48, height: 48 }} />
             </div>
           ) : posts.length === 0 ? (
-            <div className="glass-panel" style={{ padding: 48, textAlign: "center" }}>
+            <div data-scroll-reveal className="glass-panel" style={{ padding: 48, textAlign: "center" }}>
               <h2 style={{ fontSize: 22, marginBottom: 8 }}>No posts yet</h2>
               <p style={{ color: "var(--text-secondary)" }}>Check back soon — or sign in with Google to publish the first one.</p>
             </div>
@@ -162,7 +166,7 @@ export default function BlogPage() {
           background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)",
           display: "flex", alignItems: "center", justifyContent: "center", padding: 16
         }}>
-          <div className="glass-card animate-fade-in-up w-full max-w-2xl p-6 md:p-8 bg-[var(--bg-card)] border border-[var(--border-primary)]">
+          <div data-scroll-reveal className="glass-card animate-fade-in-up w-full max-w-2xl p-6 md:p-8 bg-[var(--bg-card)] border border-[var(--border-primary)]">
             <h2 style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>Write a Post</h2>
             <p style={{ color: "var(--text-secondary)", marginBottom: 24 }}>Share your insights with the community. Abusive language is strictly prohibited.</p>
             

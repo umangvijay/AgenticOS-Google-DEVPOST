@@ -1,3 +1,3 @@
 export default function PublicGroup({ children }: { children: React.ReactNode }) {
-  return <>{children}</>;
+  return <div className="public-pages">{children}</div>;
 }

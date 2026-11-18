@@ -41,6 +41,26 @@ class SQLiteSecretsRepository(BaseSecretsRepository):
         )
         return row["encrypted_value"] if row else None
 
+    async def store_secret_if_unchanged(self, user_id: str, key: str,
+                                        new_value: str,
+                                        expected_value: str) -> bool:
+        """Compare-and-set on the record's current value (30.7 backfill).
+
+        Writes the migrated envelope only when the stored ciphertext is
+        still exactly the value this worker read; a concurrent rotation
+        makes the write a no-op that reports False."""
+        conn = await self.db.connection()
+        cursor = await conn.execute(
+            """
+            UPDATE secrets SET encrypted_value = ?, updated_at = ?
+            WHERE user_id = ? AND key = ? AND encrypted_value = ?
+            """,
+            (new_value, datetime.now(timezone.utc).isoformat(),
+             user_id, key, expected_value),
+        )
+        await conn.commit()
+        return cursor.rowcount > 0
+
     async def delete_secret(self, user_id: str, key: str) -> bool:
         conn = await self.db.connection()
         cursor = await conn.execute(

@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Optional
 from google.cloud import firestore
 
@@ -12,12 +11,13 @@ class FirestoreDB:
     async def get_client(cls) -> firestore.AsyncClient:
         """Get or create the singleton AsyncClient."""
         if cls._instance is None:
-            project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+            from backend.config.settings import settings
+            project = settings.GOOGLE_CLOUD_PROJECT
             if not project:
                 logger.warning("GOOGLE_CLOUD_PROJECT not set, using default credentials.")
             
             # Note: We must use AsyncClient to maintain compatibility with FastAPI async routes
-            cls._instance = firestore.AsyncClient(project=project)
+            cls._instance = firestore.AsyncClient(project=project, database=settings.FIRESTORE_DATABASE_ID)
             logger.info("Firestore AsyncClient initialized.")
         return cls._instance
 

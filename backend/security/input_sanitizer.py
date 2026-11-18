@@ -76,9 +76,18 @@ def sanitize_text(text: str, field_name: str = "input", max_length: int = MAX_FI
     - Block XSS patterns
     - Block path traversal
     - Enforce length limit
+    - Repair lone UTF-16 surrogates (scraped HTML, PDF text, and LLM output
+      can carry them; they crash SQLite writes and corrupt JSON responses)
     """
     if not isinstance(text, str):
         raise InputValidationError(f"{field_name} must be a string", field_name)
+
+    # Lone surrogates cannot be stored or serialized — replace them before
+    # any layer downstream (DB, JSON response, SSE) has to encode the text.
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = text.encode("utf-8", "replace").decode("utf-8")
 
     # Length check
     if len(text) > max_length:
@@ -92,7 +101,10 @@ def sanitize_text(text: str, field_name: str = "input", max_length: int = MAX_FI
         if pattern.search(text):
             logger.warning(f"XSS pattern detected in {field_name}")
             raise InputValidationError(
-                f"Potentially dangerous content detected in {field_name}",
+                f"Potentially dangerous content detected in {field_name}. "
+                "Remove code, HTML, or event handlers (for example <script>, <iframe>, onclick=, "
+                "javascript: links) and describe the outcome you want in plain language instead — "
+                "for example: 'check the health of https://example.com and report the TLS expiry'.",
                 field_name,
             )
 

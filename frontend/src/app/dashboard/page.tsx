@@ -6,9 +6,10 @@ export default function DashboardPage() {
   return (
     <div className="workspace-home animate-fade-in-up">
       <div className="workspace-hero">
+        <div className="hero-orb" aria-hidden />
         <h1 className="workspace-title">Where should we begin?</h1>
         <p className="workspace-sub">
-          Tell AgentOS what you want. It plans the work, builds any missing app tools, and runs them live.
+          Tell Sandtable the outcome you want. It plans the work, can build missing app tools, and runs the workflow against connected services.
         </p>
       </div>
 
@@ -26,12 +27,12 @@ export default function DashboardPage() {
             <strong>Any HTTP API (no OpenAPI).</strong> “Build MCP tools for [app] so I can [list / get / create …]”
           </li>
           <li>
-            <strong>Website (no API).</strong> Vault → save e.g. <code>bharatenglish</code> (username/email + password).
-            Chat: “Create MCP tools for https://…”. Then: “Log in with vault credential bharatenglish and open home / use runOnSite …”
+            <strong>Website (no API).</strong> Vault → save a short name like <code>mysite-login</code> (username/email + password).
+            Chat: “Create MCP tools for https://…”. Then: “Log in with vault credential mysite-login and open home / use runOnSite …”
           </li>
         </ol>
         <p>
-          The factory registers real tools (HTTP from OpenAPI or a sketched REST spec; websites get origin-locked browser tools). The next message in this thread reuses them. CAPTCHA/OTP/MFA pause for you — AgentOS does not solve them.
+          The factory can register HTTP tools from OpenAPI or a REST sketch; websites use origin-locked browser tools. CAPTCHA, OTP, and MFA pause for you — Sandtable does not bypass them.
         </p>
       </div>
     </div>

@@ -2,6 +2,9 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
 
+import { AUTH_KEY, AUTH_CHANGED, readSession, writeSession, refreshSession } from "./auth-session";
+import { nextAuthGeneration } from "./auth-state";
+
 export interface User {
   id: string;
   email: string;
@@ -96,29 +99,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    const stored = localStorage.getItem("agentos_auth");
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        setState({
-          user: parsed.user,
-          accessToken: parsed.accessToken,
-          refreshToken: parsed.refreshToken,
-          isLoading: false,
-          isAuthenticated: !!parsed.accessToken,
-        });
-      } catch {
-        localStorage.removeItem("agentos_auth");
-        setState((s) => ({ ...s, isLoading: false }));
-      }
-    } else {
-      setState((s) => ({ ...s, isLoading: false }));
-    }
+    let cancelled = false;
+    const sync = () => {
+      const session = readSession();
+      if (!cancelled) setState({
+        user: session?.user || null, accessToken: session?.accessToken || null,
+        refreshToken: session?.refreshToken || null, isLoading: false,
+        isAuthenticated: !!session?.accessToken,
+      });
+    };
+    const onStorage = (event: StorageEvent) => { if (!event.key || event.key === AUTH_KEY) sync(); };
+    queueMicrotask(sync);
+    window.addEventListener(AUTH_CHANGED, sync);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(AUTH_CHANGED, sync);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
 
   const persistAuth = useCallback((user: User, accessToken: string, refreshToken: string) => {
     const data = { user, accessToken, refreshToken };
-    localStorage.setItem("agentos_auth", JSON.stringify(data));
+    writeSession(data);
     setState({
       user,
       accessToken,
@@ -129,7 +132,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const clearAuth = useCallback(() => {
-    localStorage.removeItem("agentos_auth");
+    writeSession(null);
     setState({
       user: null,
       accessToken: null,
@@ -139,6 +142,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  // §18.11/§19 (C7): the generation guard has PRODUCTION callers —
+  // login/logout/account switch bump it so stale async responses from
+  // an older identity are discarded by consumers.
   const login = useCallback(async (email: string, password: string) => {
     const data = await fetchJson(`${API_BASE}/auth/login`, {
       method: "POST",
@@ -146,6 +152,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       credentials: "include",
       body: JSON.stringify({ email, password }),
     }, 30000);
+    nextAuthGeneration();
     persistAuth(data.user, data.access_token, data.refresh_token);
   }, [persistAuth]);
 
@@ -156,6 +163,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       credentials: "include",
       body: JSON.stringify({ email, password, name }),
     }, 30000);
+    nextAuthGeneration();
     persistAuth(data.user, data.access_token, data.refresh_token);
   }, [persistAuth]);
 
@@ -170,16 +178,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       credentials: "include",
       body: JSON.stringify(body),
     }, 30000);
+    nextAuthGeneration();
     persistAuth(data.user, data.access_token, data.refresh_token);
   }, [persistAuth]);
 
   const loginAsGuest = useCallback(async (signal?: AbortSignal) => {
-    const data = await fetchJson(`${API_BASE}/auth/guest`, {
+    const attempt = () => fetchJson(`${API_BASE}/auth/guest`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       signal,
     }, 45000);
+    let data;
+    try {
+      data = await attempt();
+    } catch (err) {
+      // Guest establishment was observed flaking on cold starts (audit R10):
+      // one retry covers the transient window before surfacing an error.
+      if (signal?.aborted) throw err;
+      await new Promise((r) => setTimeout(r, 1200));
+      data = await attempt();
+    }
     persistAuth(data.user, data.access_token, data.refresh_token);
   }, [persistAuth]);
 
@@ -195,26 +214,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Logout locally even if server fails
       }
     }
+    nextAuthGeneration();   // stale responses from this identity die here
     clearAuth();
   }, [state.accessToken, clearAuth]);
 
   const refreshAccessToken = useCallback(async (): Promise<string | null> => {
-    if (!state.refreshToken) return null;
-
-    try {
-      const data = await fetchJson(`${API_BASE}/auth/refresh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ refresh_token: state.refreshToken }),
-      }, 8000);
-      persistAuth(data.user, data.access_token, data.refresh_token);
-      return data.access_token;
-    } catch {
-      clearAuth();
-      return null;
-    }
-  }, [state.refreshToken, persistAuth, clearAuth]);
+    return refreshSession(readSession()?.accessToken);
+  }, []);
 
   const updateProfile = useCallback(async (updates: { name?: string; avatar_url?: string }) => {
     const user = await fetchJson(`${API_BASE}/auth/me`, {

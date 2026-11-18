@@ -81,13 +81,22 @@ def validate_environment(logger) -> bool:
     errors = []
 
     gemini = os.environ.get("GEMINI_API_KEY", "").strip()
+    groq = os.environ.get("GROQ_API_KEY", "").strip()
     grok = os.environ.get("XAI_API_KEY", "").strip()
     project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
     vertex_ok = bool(project) and not project.lower().startswith("your-")
-    if (not gemini or len(gemini) < 10) and (not grok or len(grok) < 8) and not vertex_ok:
+    provider = os.environ.get("LLM_PROVIDER", "auto").strip().lower()
+    configured = {
+        "gemini": bool(gemini and len(gemini) >= 10),
+        "groq": bool(groq and len(groq) >= 10),
+        "vertex": vertex_ok,
+        "auto": bool((gemini and len(gemini) >= 10) or (groq and len(groq) >= 10) or vertex_ok),
+    }
+    if provider not in configured or not configured[provider]:
         errors.append(
-            "Set GEMINI_API_KEY in .env for local AI Studio, or GOOGLE_CLOUD_PROJECT "
-            "(and ADC / Cloud Run SA) to use Vertex Gemini. Optional: XAI_API_KEY."
+            "Configure a provider supported by the planner/orchestrator: GEMINI_API_KEY with "
+            "LLM_PROVIDER=gemini, GROQ_API_KEY with LLM_PROVIDER=groq, or GOOGLE_CLOUD_PROJECT "
+            "plus ADC / the Cloud Run service account with LLM_PROVIDER=vertex."
         )
 
     # Check Python
@@ -310,7 +319,7 @@ def print_banner(logger, has_frontend: bool):
     if has_frontend:
         logger.info(f"  Frontend:  http://localhost:{FRONTEND_PORT}")
     logger.info(f"  Storage:   {os.environ.get('STORAGE_BACKEND', 'sqlite')}")
-    logger.info(f"  Model:     {os.environ.get('GEMINI_MODEL', 'gemini-3.5-flash')}")
+    logger.info(f"  Model:     {os.environ.get('GEMINI_MODEL', 'gemini-3.8-flash')}")
     logger.info("")
     logger.info("  Press Ctrl+C to stop all services")
     logger.info("=" * 60)

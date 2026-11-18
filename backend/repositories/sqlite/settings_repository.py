@@ -17,12 +17,12 @@ logger = logging.getLogger(__name__)
 # Default settings for new users
 DEFAULT_SETTINGS = {
     "autonomy_level": 1,          # L1: ask before writes
-    "theme": "dark",
+    "theme": "light",
     "notifications_email": False,
     "notifications_approval": True,
     "notifications_enabled": True,
     "auto_approve_low_risk": False,
-    "default_model": "gemini-3.7-flash",
+    "default_model": "gemini-3.8-flash",
     "daily_token_limit": 1_000_000,
 }
 

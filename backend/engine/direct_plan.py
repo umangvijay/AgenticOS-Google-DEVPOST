@@ -361,12 +361,34 @@ def plan_from_goal(goal: str, prior_goal: str = "", catalog: Optional[Sequence[A
         if reuse_existing and not new_apps and not new_url:
             return WorkflowDefinition(tasks=[_orchestrator_task(text, timeout=180)])
 
+    urls = list(dict.fromkeys(m.group(0).rstrip(").,;]") for m in _URL.finditer(text)))
+    # Mixed goals must reach the planner intact, rather than taking the first URL.
+    residual = _URL.sub("", lowered)
+    extra_work = bool(re.search(
+        r"\b(?:save|remember|memory|summarize|summarise|compare|email|write|create|build|fetch|download|translate)\b",
+        residual,
+    ))
     if url and any(w in lowered for w in health_words) and not wants_mcp and not _wants_browse(text, url):
-        return WorkflowDefinition(tasks=[
-            TaskDefinition(task_id="health-1", agent="core.health", input_data={"url": url}, timeout_seconds=45),
-        ])
+        summary_requested = bool(re.search(r"\b(?:summarize|summarise)\b", residual))
+        other_work = bool(re.search(
+            r"\b(?:save|remember|memory|compare|email|write|create|build|fetch|download|translate)\b", residual,
+        ))
+        if extra_work and (not summary_requested or other_work):
+            return None
+        tasks = [
+            TaskDefinition(task_id=f"health-{i}", agent="core.health", input_data={"url": target}, timeout_seconds=45)
+            for i, target in enumerate(urls, 1)
+        ]
+        if summary_requested:
+            tasks.append(TaskDefinition(
+                task_id="summarize-health", agent="core.chat",
+                input_data={"prompt": text}, dependencies=[task.task_id for task in tasks],
+            ))
+        return WorkflowDefinition(tasks=tasks)
 
     if wants_mcp:
+        if _wants_use_after_mcp(text) and _catalog_covers_goal(text, catalog):
+            return WorkflowDefinition(tasks=[_orchestrator_task(text)])
         tasks = _mcp_tasks(text, url, prior_goal)
         mcp_ids = [t.task_id for t in tasks]
         if _wants_use_after_mcp(text) or any(w in lowered for w in BROWSE_WORDS) or _wants_app(text):
@@ -396,30 +418,15 @@ def plan_from_goal(goal: str, prior_goal: str = "", catalog: Optional[Sequence[A
     if url and _is_login_url(url):
         return WorkflowDefinition(tasks=[_orchestrator_task(text, timeout=300)])
 
-    if url and (any(w in lowered for w in http_words) or lowered.startswith("http")):
-        return WorkflowDefinition(tasks=[
-            TaskDefinition(
-                task_id="http-1",
-                agent="core.http",
-                input_data={"url": url, "method": "GET"},
-                timeout_seconds=45,
-            ),
-        ])
-
     if url:
+        # Only plain GET requests bypass planning; compound deliverables use the AI DAG.
+        if re.search(r"\b(?:save|remember|memory|summarize|summarise|compare|write|then|post|delete|update)\b", residual):
+            return None
         return WorkflowDefinition(tasks=[
-            TaskDefinition(task_id="http-1", agent="core.http", input_data={"url": url, "method": "GET"}, timeout_seconds=45),
+            TaskDefinition(task_id=f"http-{i}", agent="core.http",
+                           input_data={"url": target, "method": "GET"}, timeout_seconds=45)
+            for i, target in enumerate(urls, 1)
         ])
-
-    # Short conversational asks should not wait on the full planner.
-    if len(text) < 240 and not url:
-        return WorkflowDefinition(tasks=[
-            TaskDefinition(
-                task_id="chat-1",
-                agent="core.chat",
-                input_data={"prompt": text},
-                timeout_seconds=25,
-            ),
-        ])
+    # Length is not intent: short automation goals still need planning.
 
     return None

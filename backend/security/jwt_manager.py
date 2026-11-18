@@ -71,6 +71,16 @@ class JWTManager:
 
     def _generate_keypair(self, priv_path: Path, pub_path: Path) -> None:
         """Generate a new RSA-2048 keypair and save to disk."""
+        # Container images run read-only as a non-root user: auto-generation
+        # is impossible there. Fail with the operator action, not a raw
+        # PermissionError (audit F12-style "clear disabled state").
+        if settings.APP_ENV.lower() == "production" and not os.access(priv_path.parent, os.W_OK | os.X_OK):
+            raise RuntimeError(
+                "JWT keys are not configured and cannot be generated: "
+                f"'{priv_path.parent}' is not writable by the runtime user. "
+                "Provide the keypair via JWT_PRIVATE_KEY / JWT_PUBLIC_KEY "
+                "(Secret Manager or mounted secrets) and restart."
+            )
         # Create directory
         priv_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -167,6 +177,7 @@ class JWTManager:
             algorithms=[ALGORITHM],
             issuer=settings.JWT_ISSUER,
             audience=settings.JWT_AUDIENCE,
+            options={"require": ["sub", "jti", "exp", "iat", "iss", "aud", "type"]},
         )
 
         if claims.get("type") != TOKEN_TYPE_ACCESS:
@@ -187,6 +198,7 @@ class JWTManager:
             algorithms=[ALGORITHM],
             issuer=settings.JWT_ISSUER,
             audience=settings.JWT_AUDIENCE,
+            options={"require": ["sub", "jti", "exp", "iat", "iss", "aud", "type"]},
         )
 
         if claims.get("type") != TOKEN_TYPE_REFRESH:

@@ -15,17 +15,17 @@ class AgentEvaluationRecord(BaseModel):
     recovery_attempts: int
     successful_recoveries: int
     
-    # Tool accuracy
+    # Tool accuracy (§12.9: None = unavailable/unknown, never zero)
     tool_calls: int
-    unknown_tool_call_rate: float = 0.0
-    invalid_argument_rate: float = 0.0
-    tool_schema_violation_rate: float = 0.0
+    unknown_tool_call_rate: Optional[float] = None
+    invalid_argument_rate: Optional[float] = None
+    tool_schema_violation_rate: Optional[float] = None
     
-    # Latency & Cost
-    latency_ms: float
-    token_usage_input: int
-    token_usage_output: int
-    token_usage_total: int
+    # Latency & Cost (§12.9: None = unavailable/unknown, never zero)
+    latency_ms: Optional[float] = None
+    token_usage_input: Optional[int] = None
+    token_usage_output: Optional[int] = None
+    token_usage_total: Optional[int] = None
     
     # Approvals
     approval_latency_ms: Optional[float] = None

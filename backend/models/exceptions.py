@@ -6,3 +6,11 @@ class SemanticException(Exception):
         self.reason = reason
         self.message = message
         self.details = details or {}
+
+
+class StaleTaskLeaseError(RuntimeError):
+    """An earlier task execution tried to overwrite a newer lease holder."""
+
+
+class DuplicateIdentityError(ValueError):
+    """An account already owns this unique identity."""

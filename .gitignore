@@ -1,43 +1,46 @@
-# Environments
+# Credentials and local runtime state
 .env
-.env.local
-.env.*.local
-
-# Local runtime data (do not publish inboxes, SQLite, or generated Studio apps)
-data/*.db
-data/*.db-shm
-data/*.db-wal
-data/*.json
-data/artifacts/
-frontend/data/contact_inbox.json
-
-# Cloud / Google credential files only (not the Vault UI)
-**/serviceAccount*.json
-**/google-credentials.json
-**/application_default_credentials.json
-
-# Python
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*service-account*.json
+*credentials*.json
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+# Build and dependency outputs
 __pycache__/
+*.py[cod]
 .pytest_cache/
 .venv/
-*.pyc
-*.pyo
-
-# Node
+venv/
 node_modules/
 .next/
-
-# Security keys
-backend/security/keys/*.pem
-
-# Local logs
-*.log
-
-# macOS
+out/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
 .DS_Store
-
-# Terraform
 .terraform/
 *.tfstate
 *.tfstate.*
-.terraform.lock.hcl
+*.tfvars
+
+# Local planning documents (keep on disk; do not publish).
+*[Pp][Hh][Aa][Ss][Ee]*.[mM][dD]
+**/*[Pp][Hh][Aa][Ss][Ee]*/**/*.[mM][dD]
+
+# Generated qualification captures/archives and local utilities.
+/docs/evidence/
+/frontend/docs/evidence/
+*.log
+/ngrok.zip

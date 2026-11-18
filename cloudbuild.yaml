@@ -1,15 +1,28 @@
-# API image only (root Dockerfile). No worker service.
-# Cloud Run GitHub continuous deployment should use the root Dockerfile
-# and should NOT also attach a trigger to this file — that would double-build.
-# `gcloud run deploy --source` uses this file if present; it must not deploy
-# a second service. Cloud Run itself deploys the image this build produces.
+# Build immutable API and worker images. Deployment is deliberately separate:
+# API secrets/IAM and a Cloud Run Worker Pool must be configured explicitly.
 timeout: 1800s
 options:
   logging: CLOUD_LOGGING_ONLY
 steps:
+  # Build API image (root Dockerfile) — COMMIT_SHA is Cloud Build's built-in
+  # substitution, baked into the image so /api/v1/health can report it.
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', '${_IMAGE}', '-f', 'Dockerfile', '.']
+    args: ['build', '--build-arg', 'COMMIT_SHA=${COMMIT_SHA}', '-t', '${_API_IMAGE}', '-f', 'Dockerfile', '.']
+
+  # Build Worker image (Dockerfile.worker)
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '--build-arg', 'COMMIT_SHA=${COMMIT_SHA}', '-t', '${_WORKER_IMAGE}', '-f', 'Dockerfile.worker', '.']
+
+  # Test the dependencies and Python runtime actually shipped, with no cloud credentials.
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['run', '--rm', '--network=none', '-e', 'APP_ENV=development', '-e', 'STORAGE_BACKEND=sqlite', '-e', 'SQLITE_DB_PATH=/tmp/release.db', '-e', 'JWT_PRIVATE_KEY_PATH=/tmp/keys/private.pem', '-e', 'JWT_PUBLIC_KEY_PATH=/tmp/keys/public.pem', '${_API_IMAGE}', 'python', '-m', 'pytest', 'backend/tests', '-q', '-p', 'no:cacheprovider']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['run', '--rm', '--network=none', '${_WORKER_IMAGE}', 'python', '-c', 'from google.cloud import pubsub_v1; import backend.worker']
+
 images:
-  - '${_IMAGE}'
+  - '${_API_IMAGE}'
+  - '${_WORKER_IMAGE}'
 substitutions:
-  _IMAGE: 'gcr.io/${PROJECT_ID}/agentos-api'
+  _API_IMAGE: 'gcr.io/${PROJECT_ID}/agentos-api'
+  _WORKER_IMAGE: 'gcr.io/${PROJECT_ID}/agentos-worker'
+  _REGION: 'us-central1'

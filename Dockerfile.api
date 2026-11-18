@@ -37,4 +37,11 @@ ENV PYTHONPATH=/app \
 EXPOSE 8080
 
 # Cloud Run sets PORT. Do not bake .env into this image.
+# Run the API/worker and browser as an unprivileged identity.
+RUN groupadd --gid 10001 agentos && useradd --uid 10001 --gid 10001 --create-home agentos \
+    && mkdir -p /app/data /app/backend/security/keys /app/artifacts \
+    && chown -R agentos:agentos /app/data /app/backend/security/keys /app/artifacts \
+    && chmod -R a+rX /ms-playwright
+USER 10001:10001
+
 CMD ["sh", "-c", "uvicorn backend.api.main:app --host 0.0.0.0 --port ${PORT:-8080}"]

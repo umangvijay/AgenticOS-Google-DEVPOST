@@ -1,0 +1,130 @@
+# §20.27 — cloud-portable deployment values. Storage backend is a CHOICE,
+# not a hardcode: postgres (default) or firestore (GCP). NATS JetStream
+# is the durable bus; the in-process bus is a single-replica fallback.
+
+global:
+  imageRegistry: ""          # e.g. ghcr.io/your-org
+  imagePullPolicy: IfNotPresent
+  imageTag: "latest"
+
+storage:
+  backend: postgres          # postgres | firestore
+  postgres:
+    dsn: postgresql://agentos:agentos@agentos-postgres:5432/agentos
+    # Credentials come from the secret below, never values.
+    # REQUIRED KEYS (envFrom feeds the postgres image directly):
+    #   POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB  (postgres image)
+    #   dsn                                            (api/worker DSN)
+    # Also required at install time (APP_ENV=production startup checks):
+    #   agentos-secrets/SECRETS_MASTER_KEY, agentos-jwt/JWT_PRIVATE_KEY,
+    #   agentos-jwt/JWT_PUBLIC_KEY, agentos-providers/{GOOGLE_API_KEY,
+    #   AWS_BEARER_TOKEN_BEDROCK, AWS_REGION}
+    existingSecret: agentos-db
+    secretKey: dsn
+  firestore:
+    project: ""              # required when backend=firestore
+    databaseId: "(default)"
+
+bus:
+  transport: nats            # nats | inprocess
+  nats:
+    servers: nats://agentos-nats:4222
+
+api:
+  replicaCount: 2
+  image: agentos-api
+  # §27.D8: imageDigest: "sha256:…" pins the deployed bytes (required for release qualification)
+  imageDigest: ""
+  port: 8000
+  env:
+    APP_ENV: production
+  probes:
+    # Phase 22 (kind install): the production API serves /health —
+    # /api/health 404s and pods never turn Ready.
+    livenessPath: /health
+    readinessPath: /health
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+worker:
+  replicaCount: 1
+  image: agentos-worker
+  # §27.D8: imageDigest: "sha256:…" pins the deployed bytes (required for release qualification)
+  imageDigest: ""
+  command: ["python", "-m", "backend.worker"]
+  env:
+    WORKER_ONLY: "1"
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+browserWorker:
+  enabled: true
+  replicaCount: 1
+  image: agentos-worker
+  # §27.D8: imageDigest: "sha256:…" pins the deployed bytes (required for release qualification)
+  imageDigest: ""
+  command: ["python", "-m", "backend.worker"]
+  env:
+    WORKER_ONLY: "1"
+    BROWSER_WORKER: "1"
+
+runner:
+  enabled: true
+  replicaCount: 1
+  image: agentos-worker
+  # §27.D8: imageDigest: "sha256:…" pins the deployed bytes (required for release qualification)
+  imageDigest: ""
+  command: ["python", "-m", "backend.worker"]
+  env:
+    RUNNER_WORKER: "1"
+  # §20.14: generated code runs in an isolated runner — no container
+  # management sockets, no privilege escalation, bounded resources.
+  securityContext:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: 500m, memory: 768Mi}
+
+frontend:
+  replicaCount: 1
+  image: agentos-frontend
+  # §27.D8: imageDigest: "sha256:…" pins the deployed bytes (required for release qualification)
+  imageDigest: ""
+  port: 3000
+  env:
+    NEXT_PUBLIC_API_URL: ""
+
+nats:
+  enabled: true
+  image: nats:2.10-alpine
+  jetstream:
+    storage: 5Gi
+    storageClass: ""
+
+postgres:
+  enabled: true
+  image: postgres:16-alpine
+  storage: 10Gi
+  storageClass: ""
+  auth:
+    existingSecret: agentos-db
+    usernameKey: username
+    passwordKey: password
+    databaseKey: database
+
+ingress:
+  enabled: false
+  className: nginx
+  host: agentos.example.com
+  tlsSecret: agentos-tls
+
+secrets:
+  # Provider credentials are injected from an EXISTING external secret
+  # (ExternalSecrets/SealedSecrets); the chart never writes plaintext.
+  external:
+    agentos-providers:
+      keys: [GOOGLE_API_KEY, AWS_BEARER_TOKEN_BEDROCK, AWS_REGION]

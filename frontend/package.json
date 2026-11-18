@@ -3,45 +3,75 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "npm run build && next start",
-    "dev:fast": "next dev",
+    "dev": "next dev --webpack",
+    "dev:fast": "next dev --webpack",
     "build": "npx @tailwindcss/cli -i ./src/app/globals.css -o ./src/app/built.css --minify && next build --webpack && node strip-polyfills.js",
-    "postbuild": "node strip-polyfills.js",
+    "postbuild": "node strip-polyfills.js && node prepare-standalone.mjs",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run",
+    "typecheck": "next typegen && tsc --noEmit",
+    "test:e2e:production": "cross-env E2E_PRODUCTION=1 playwright test",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@microsoft/fetch-event-source": "^2.0.1",
     "@react-oauth/google": "^0.13.5",
+    "@react-three/fiber": "^9.8.2",
+    "@sentry/nextjs": "^10.75.2",
     "@types/dagre": "^0.7.54",
+    "@types/three": "^0.186.0",
     "@xyflow/react": "^12.11.3",
     "clsx": "^2.1.1",
     "dagre": "^0.8.5",
     "date-fns": "^4.4.0",
+    "framer-motion": "^13.2.0",
     "lucide-react": "^1.33.0",
-    "next": "16.3.2",
+    "next": "16.4.6",
     "radash": "^12.1.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "tailwind-merge": "^3.6.0"
+    "react-markdown": "^10.1.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.6.0",
+    "three": "^0.186.1"
   },
   "devDependencies": {
-    "@next/bundle-analyzer": "^16.3.3",
+    "@next/bundle-analyzer": "16.4.0",
+    "@playwright/test": "^1.62.1",
+    "@tailwindcss/cli": "4.3.3",
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.8",
+    "@types/node": "^24",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "critters": "^0.0.23",
     "cross-env": "^10.1.0",
     "eslint": "^9",
-    "eslint-config-next": "16.3.2",
+    "eslint-config-next": "16.4.6",
+    "happy-dom": "^21.0.3",
+    "jsdom": "^31.0.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
   },
   "browserslist": [
     "Chrome >= 109",
     "Safari >= 15.6",
     "Edge >= 114",
     "Firefox >= 115"
-  ]
+  ],
+  "overrides": {
+    "@sentry/bundler-plugin-core": {
+      "glob": "14.0.5"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.8"
+    }
+  }
 }

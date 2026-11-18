@@ -121,37 +121,12 @@ def _same_origin(candidate: str, origin: str) -> str:
 
 
 def _fallback_plan(origin: str, start_url: str, source: str) -> Dict[str, Any]:
-    login = start_url if "/login" in start_url.lower() else origin.rstrip("/") + "/#/user/login"
-    home = start_url if "/home" in start_url.lower() or start_url.rstrip("/").endswith(origin) else origin.rstrip("/") + "/#/home"
-    if "/login" not in start_url.lower() and "#" in start_url:
-        home = start_url
-    return {
-        "name": urlparse(origin).hostname or "website",
-        "origin": origin,
-        "tools": [
-            {
-                "name": "runOnSite",
-                "description": f"Do any task on {origin} in a real browser (read, click, fill, navigate).",
-                "start_url": start_url,
-                "goal_template": "Complete the user's task on this website.",
-                "needs_login": False,
-            },
-            {
-                "name": "login",
-                "description": f"Log in on {origin} using a Vault credential (username/email + password).",
-                "start_url": login,
-                "goal_template": "Log in with the stored site credential. Stop clearly if CAPTCHA or MFA blocks you.",
-                "needs_login": True,
-            },
-            {
-                "name": "openHome",
-                "description": f"Open the main/home screen of {origin} and summarize what is visible.",
-                "start_url": home,
-                "goal_template": "Open the home page and describe the main actions available.",
-                "needs_login": False,
-            },
-        ],
-    }
+    """A generic browser capability; it does not invent site-specific routes."""
+    return {"name": urlparse(origin).hostname or "website", "origin": origin, "tools": [{
+        "name": "runOnSite", "description": f"Execute a user-specified browser task on {origin}.",
+        "start_url": start_url, "goal_template": "Complete the user's task on this website.",
+        "needs_login": False,
+    }]}
 
 
 async def plan_website_connector(source: str, origin: str, start_url: str) -> Dict[str, Any]:
@@ -179,15 +154,12 @@ Return JSON only:
 Always include runOnSite (free-text goal on the site). Include login if the site has a sign-in page.
 3 to 8 tools. start_url must stay on {origin}.
 """
-    try:
-        payload = await gemini_client.generate_json(prompt)
-        if isinstance(payload, dict) and payload.get("tools"):
-            payload.setdefault("name", urlparse(origin).hostname)
-            payload["origin"] = origin
-            return payload
-    except Exception as exc:
-        logger.warning("Website MCP plan fell back to defaults: %s", exc)
-    return _fallback_plan(origin, start_url, source)
+    payload = await gemini_client.generate_json(prompt)
+    if not isinstance(payload, dict) or not payload.get("tools"):
+        raise ValueError("The model did not return a valid website tool plan")
+    payload.setdefault("name", urlparse(origin).hostname)
+    payload["origin"] = origin
+    return payload
 
 
 def tools_from_plan(mcp_id: str, origin: str, start_url: str, plan: Dict[str, Any]) -> List[CachedToolDefinition]:
@@ -225,7 +197,7 @@ def tools_from_plan(mcp_id: str, origin: str, start_url: str, plan: Dict[str, An
                 mcp_version="1.0.0",
                 discovered_at=now,
                 expires_at=expires,
-                risk_level=RiskLevel.MEDIUM if needs_login else RiskLevel.LOW,
+                risk_level=RiskLevel.HIGH,  # Generic browser goals may perform external writes.
                 operation={
                     "kind": "browser",
                     "origin": origin,
@@ -248,6 +220,9 @@ async def execute_browser_tool(
     secrets_repo=None,
     run_id: Optional[str] = None,
     task_id: Optional[str] = None,
+    emit_progress=None,
+    emit_browser_frame=None,
+    approval_ctx: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     operation = tool.get("operation") or {}
     origin = str(operation.get("origin") or "")
@@ -276,6 +251,8 @@ async def execute_browser_tool(
             max_steps=40,
             run_id=run_id,
             task_id=task_id,
+            emit_progress=emit_progress, emit_browser_frame=emit_browser_frame,
+            approval_ctx=approval_ctx,
         )
         return {"ok": bool(outcome.get("success")), **outcome}
     except ChallengePause:

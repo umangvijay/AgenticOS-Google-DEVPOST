@@ -1,0 +1,163 @@
+{{- $fullname := include "agentos.fullname" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-api
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: {{ $fullname }}-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-frontend
+spec:
+  selector:
+    app: {{ $fullname }}-frontend
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    - hosts: [{{ .Values.ingress.host | quote }}]
+      secretName: {{ .Values.ingress.tlsSecret }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-api
+                port: { number: 8000 }
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-frontend
+                port: { number: 3000 }
+{{- end }}
+{{- if .Values.nats.enabled }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $fullname }}-nats
+spec:
+  serviceName: {{ $fullname }}-nats
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ $fullname }}-nats
+  template:
+    metadata:
+      labels:
+        app: {{ $fullname }}-nats
+    spec:
+      containers:
+        - name: nats
+          image: {{ .Values.nats.image }}
+          # Phase 22 (found by the kind install): `command: ["-js", …]`
+          # made kubelet exec "-js" as the binary — JetStream never
+          # started. nats-server is the image ENTRYPOINT; JetStream is an
+          # argument, and the store dir must match the mounted volume.
+          args: ["-js", "-sd", "/data", "-m", "8222"]
+          ports:
+            - containerPort: 4222
+              name: client
+            - containerPort: 8222
+              name: monitor
+          volumeMounts:
+            - name: jetstream
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: jetstream
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.nats.jetstream.storageClass }}
+        storageClassName: {{ .Values.nats.jetstream.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.nats.jetstream.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-nats
+spec:
+  selector:
+    app: {{ $fullname }}-nats
+  ports:
+    - port: 4222
+      targetPort: 4222
+{{- end }}
+{{- if and .Values.postgres.enabled (eq .Values.storage.backend "postgres") }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $fullname }}-postgres
+spec:
+  serviceName: {{ $fullname }}-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ $fullname }}-postgres
+  template:
+    metadata:
+      labels:
+        app: {{ $fullname }}-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.postgres.auth.existingSecret }}
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.postgres.storageClass }}
+        storageClassName: {{ .Values.postgres.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-postgres
+spec:
+  selector:
+    app: {{ $fullname }}-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+{{- end }}

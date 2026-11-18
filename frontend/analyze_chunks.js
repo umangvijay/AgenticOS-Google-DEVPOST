@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- Node runs this maintenance script as CommonJS. */
 const fs = require('fs');
 const html = fs.readFileSync('.next/analyze/client.html', 'utf8');
 const match = html.match(/window\.chartData = (\[.*?\]);/);

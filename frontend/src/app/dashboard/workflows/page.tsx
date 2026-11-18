@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { runStateStyle } from "@/lib/task-states";
 import { listWorkflows, WorkflowRun } from "@/lib/api";
 import Link from "next/link";
 
@@ -24,7 +25,7 @@ export default function WorkflowsPage() {
   }, []);
 
   return (
-    <div className="animate-fade-in">
+    <div className="animate-fade-in" data-scroll-reveal>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 32 }}>
         <div>
           <h1 style={{ fontSize: 24, fontWeight: 700 }}>Workflows</h1>
@@ -60,7 +61,11 @@ export default function WorkflowsPage() {
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
                 <div>
-                  <h3 style={{ fontSize: 16, fontWeight: 600, color: "var(--text-primary)", marginBottom: 4 }}>
+                  <h3 style={{
+                    fontSize: 16, fontWeight: 600, color: "var(--text-primary)", marginBottom: 4,
+                    display: "-webkit-box", WebkitLineClamp: 2,
+                    WebkitBoxOrient: "vertical" as const, overflow: "hidden",
+                  }}>
                     {wf.goal}
                   </h3>
                   <div style={{ fontSize: 13, color: "var(--text-tertiary)", display: "flex", gap: 16 }}>
@@ -68,12 +73,8 @@ export default function WorkflowsPage() {
                     <span>Started: {new Date(wf.created_at).toLocaleString()}</span>
                   </div>
                 </div>
-                <span className={`badge ${
-                  wf.status === "COMPLETED" ? "badge-success" :
-                  wf.status === "FAILED" ? "badge-error" :
-                  wf.status === "RUNNING" ? "badge-info" : "badge-neutral"
-                }`}>
-                  {wf.status}
+                <span className={`badge ${runStateStyle(wf.status).badge}`}>
+                  {runStateStyle(wf.status).label}
                 </span>
               </div>
               
@@ -82,11 +83,7 @@ export default function WorkflowsPage() {
                 {wf.tasks.map(t => (
                   <div key={t.task_id} style={{
                     flex: 1, height: 4, borderRadius: 2,
-                    background: 
-                      t.status === "COMPLETED" ? "var(--success)" :
-                      t.status === "FAILED" ? "var(--error)" :
-                      t.status === "RUNNING" ? "var(--info)" :
-                      "var(--bg-tertiary)"
+                    background: runStateStyle(t.status).color
                   }} title={`${t.agent}: ${t.status}`} />
                 ))}
               </div>
@@ -99,7 +96,7 @@ export default function WorkflowsPage() {
             <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
           </svg>
           <h3 style={{ fontSize: 16, fontWeight: 500, color: "var(--text-primary)", marginBottom: 8 }}>No workflows yet</h3>
-          <p style={{ marginBottom: 24 }}>Start by giving AgentOS a goal.</p>
+          <p style={{ marginBottom: 24 }}>Start by giving Sandtable a goal.</p>
           <Link href="/dashboard" className="btn btn-primary">Create Workflow</Link>
         </div>
       )}

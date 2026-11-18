@@ -92,7 +92,7 @@ export default function WorkflowExecutionPage() {
       id: t.task_id,
       type: 'custom',
       position: { x: 0, y: 0 },
-      data: { label: t.task_id, status: t.status, type: t.agent }
+      data: { label: t.title || t.task_id, status: t.status, type: t.agent }
     }));
 
     const initialEdges: Edge[] = [];

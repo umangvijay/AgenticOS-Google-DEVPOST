@@ -2,7 +2,11 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { getWorkflow, subscribeWorkflowEvents, cancelWorkflow, retryWorkflow, listApprovals, resolveApproval, WorkflowRun, WorkflowEvent } from "@/lib/api";
+import { getWorkflow, subscribeWorkflowEvents, cancelWorkflow, retryWorkflow, listApprovals, resolveApproval, WorkflowRun, WorkflowEvent, getDelegations, DelegationRow } from "@/lib/api";
+import { ArtifactEvidencePanelLazy } from "@/components/ArtifactEvidencePanelLazy";
+import { deriveProgress } from "@/lib/task-states";
+import { SpecialistPanel } from "@/components/SpecialistPanel";
+import { CoordinationGraph } from "@/components/CoordinationGraph";
 import WorkflowGraph from "@/components/WorkflowGraph";
 
 // Assuming we would have an API function like this in the real api.ts
@@ -20,12 +24,16 @@ export default function WorkflowExecutionPage() {
 
   const [workflow, setWorkflow] = useState<WorkflowRun | null>(null);
   const [events, setEvents] = useState<WorkflowEvent[]>([]);
+  const [delegations, setDelegations] = useState<DelegationRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const eventsEndRef = useRef<HTMLDivElement>(null);
 
   // Load initial state
   useEffect(() => {
+    getDelegations(runId)
+      .then(res => setDelegations(res.delegations || []))
+      .catch(() => setDelegations(null));
     async function load() {
       try {
         const wf = await getWorkflow(runId);
@@ -41,11 +49,6 @@ export default function WorkflowExecutionPage() {
 
   // Subscribe to SSE
   useEffect(() => {
-    if (!workflow || ["COMPLETED", "FAILED", "CANCELLED"].includes(workflow.status)) {
-      // Don't subscribe if already in terminal state (though we could for history if API supported it)
-      // For now, if we want live updates, we subscribe
-    }
-
     const unsubscribe = subscribeWorkflowEvents(
       runId,
       (event) => {
@@ -56,7 +59,7 @@ export default function WorkflowExecutionPage() {
         // Update local workflow state based on event
         setWorkflow(prev => {
           if (!prev) return prev;
-          const updated = { ...prev };
+          const updated = { ...prev, tasks: [...prev.tasks] };
           
           if (event.type === "WORKFLOW_COMPLETED") updated.status = "COMPLETED";
           if (event.type === "WORKFLOW_FAILED") updated.status = "FAILED";
@@ -120,7 +123,10 @@ export default function WorkflowExecutionPage() {
     }
   };
 
-  if (loading) return (
+    // §15.26 (audit W5): progress counters derive from the AUTHORITATIVE
+  // task states the server reconciled — never incremented locally.
+  const progress = deriveProgress(workflow?.tasks ?? []);
+if (loading) return (
     <div style={{ display: "flex", justifyContent: "center", padding: 100 }}>
       <div className="spinner" />
     </div>
@@ -162,7 +168,15 @@ export default function WorkflowExecutionPage() {
 
           <div style={{ display: "flex", gap: 12 }}>
             {!isTerminal && (
-              <button className="btn btn-danger btn-sm" onClick={handleCancel}>Cancel Workflow</button>
+              <>
+                <button className="btn btn-danger btn-sm" onClick={handleCancel}>Cancel Workflow</button>
+                <span style={{ fontSize: 13, color: "var(--text-secondary)", alignSelf: "center" }} aria-live="polite">
+                  {progress.completed}/{progress.total} completed
+                  {progress.running ? ` · ${progress.running} running` : ""}
+                  {progress.waiting ? ` · ${progress.waiting} waiting` : ""}
+                  {progress.failed ? ` · ${progress.failed} attention` : ""}
+                </span>
+              </>
             )}
             {["FAILED", "CANCELLED"].includes(workflow.status) && (
               <button className="btn btn-primary btn-sm" onClick={handleRetry}>Retry Failed Tasks</button>
@@ -172,6 +186,14 @@ export default function WorkflowExecutionPage() {
 
         {/* DAG Visualization */}
         <div className="glass-card" style={{ padding: 24, flex: 1, display: "flex", flexDirection: "column" }}>
+          {delegations && delegations.length > 0 && (
+            <section className="glass-card" style={{ padding: 24, marginBottom: 24 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Coordination</h2>
+              <CoordinationGraph delegations={delegations} />
+            </section>
+          )}
+          <SpecialistPanel runId={runId} revision={events.length} />
+          <ArtifactEvidencePanelLazy />
           <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 20 }}>Execution Plan</h2>
           
           <div style={{ flex: 1, minHeight: 400 }}>
@@ -210,7 +232,7 @@ export default function WorkflowExecutionPage() {
                     respondToApproval(task.task_id, true);
                     setWorkflow(prev => {
                       if (!prev) return prev;
-                      const updated = { ...prev };
+                      const updated = { ...prev, tasks: [...prev.tasks] };
                       const idx = updated.tasks.findIndex(t => t.task_id === task.task_id);
                       if (idx >= 0) updated.tasks[idx].status = "RUNNING";
                       return updated;
@@ -226,7 +248,7 @@ export default function WorkflowExecutionPage() {
                     respondToApproval(task.task_id, false);
                     setWorkflow(prev => {
                       if (!prev) return prev;
-                      const updated = { ...prev };
+                      const updated = { ...prev, tasks: [...prev.tasks] };
                       const idx = updated.tasks.findIndex(t => t.task_id === task.task_id);
                       if (idx >= 0) {
                         updated.tasks[idx].status = "FAILED";

@@ -145,7 +145,7 @@ class ContextManager:
                 "warning": bool,
             }
         """
-        limit = daily_limit or settings.DEFAULT_DAILY_TOKEN_LIMIT
+        limit = daily_limit if daily_limit is not None else settings.DEFAULT_DAILY_TOKEN_LIMIT
         today = date.today().isoformat()
         key = f"{user_id}:{today}"
 

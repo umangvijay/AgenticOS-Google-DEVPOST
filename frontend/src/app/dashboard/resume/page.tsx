@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { scanResumeFile, createResumeFromText, renderResumeHtml } from "@/lib/api";
+import { ArtifactEvidencePanel } from "@/components/ArtifactEvidencePanel";
 
 function ResumeFromText({ jobDescription, onText }: { jobDescription: string; onText?: (text: string) => void }) {
   const [profile, setProfile] = useState("");
@@ -40,6 +41,7 @@ export default function ResumePage() {
   const [loading, setLoading] = useState(false);
   const [extractedText, setExtractedText] = useState("");
   const [htmlPreview, setHtmlPreview] = useState("");
+  const [deliverableId, setDeliverableId] = useState<string | null>(null);
   const [tailoring, setTailoring] = useState(false);
   const [results, setResults] = useState<{
     score: number;
@@ -92,6 +94,11 @@ export default function ResumePage() {
     setTailoring(true);
     try {
       const data = await createResumeFromText(source, jobDescription, true);
+      // §17.21: when the backend records the durable deliverable, the
+      // evidence panel mounts for it.
+      const delivery = (data as { delivery?: { deliverable_id?: string } })
+        .delivery;
+      setDeliverableId(delivery?.deliverable_id ?? null);
       const resume = (data.resume || data) as Record<string, unknown>;
       if (data.html && typeof data.html === "string") {
         setHtmlPreview(data.html);
@@ -117,7 +124,7 @@ export default function ResumePage() {
   }
 
   return (
-    <div className="animate-fade-in" style={{ maxWidth: 1000, margin: "0 auto" }}>
+    <div className="animate-fade-in" data-scroll-reveal style={{ maxWidth: 1000, margin: "0 auto" }}>
       <div style={{ marginBottom: 32 }}>
         <h1 style={{ fontSize: 24, fontWeight: 700 }}>Resume & ATS Scanner</h1>
         <p style={{ color: "var(--text-secondary)" }}>Analyze your resume against a job description and generate tailored versions.</p>
@@ -247,12 +254,15 @@ export default function ResumePage() {
                 <button type="button" className="btn btn-secondary" style={{ width: "100%" }} onClick={() => void handleTailor()} disabled={tailoring}>
                   {tailoring ? "Tailoring…" : "Generate Tailored Resume"}
                 </button>
+                {deliverableId && (
+                  <ArtifactEvidencePanel deliverableId={deliverableId} />
+                )}
                 {htmlPreview && (
                   <>
                     <button type="button" className="btn btn-primary" style={{ width: "100%" }} onClick={downloadHtml}>
                       Download HTML
                     </button>
-                    <iframe title="Resume preview" srcDoc={htmlPreview} style={{ width: "100%", minHeight: 360, border: "1px solid var(--border-primary)", borderRadius: 12, background: "white" }} />
+                    <iframe title="Resume preview" srcDoc={htmlPreview} sandbox="" referrerPolicy="no-referrer" style={{ width: "100%", minHeight: 360, border: "1px solid var(--border-primary)", borderRadius: 12, background: "white" }} />
                   </>
                 )}
               </div>

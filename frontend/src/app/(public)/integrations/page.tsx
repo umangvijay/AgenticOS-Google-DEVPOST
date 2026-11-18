@@ -3,51 +3,66 @@ import Link from "next/link";
 
 export const metadata = { title: "Integrations" };
 
-const APPS = [
-  { name: "JSONPlaceholder", use: "REST APIs from OpenAPI or a docs URL" },
-  { name: "GitHub", use: "Repos, issues, and pull requests from a description" },
-  { name: "HTTPBin", use: "Live probe any public HTTP service" },
-  { name: "Gmail / SMTP", use: "Send mail with a vault-stored SMTP login" },
-  { name: "Any SaaS", use: "If it has an HTTP API, AgentOS can build the tools" },
+const BUILD_PATHS = [
+  { number: "01", title: "Give it a contract", detail: "Paste an OpenAPI document or point to public API docs.", method: "OpenAPI / docs" },
+  { number: "02", title: "Describe the missing action", detail: "Tell the builder which operations your workflow needs.", method: "Natural-language brief" },
+  { number: "03", title: "Test before use", detail: "Validate endpoints and tool inputs, then review before enabling access.", method: "Live validation" },
+];
+
+const EXAMPLES = [
+  { name: "Public REST API", tags: "OpenAPI · no credential", icon: "{}", description: "Turn an API schema into typed, callable tools for a run." },
+  { name: "Your SaaS workspace", tags: "Docs · scoped key", icon: "↗", description: "Describe the operations you need and attach access through the encrypted vault." },
+  { name: "A website", tags: "Browser · approval-aware", icon: "⌘", description: "Use visible browser actions when there is no suitable API. Sign-in challenges pause for you." },
+  { name: "An internal service", tags: "Custom · access-controlled", icon: "◇", description: "Build against your endpoint contract and keep credentials scoped to your workspace." },
 ];
 
 export default function PublicIntegrationsPage() {
   return (
-    <div className="mesh-gradient" style={{ minHeight: "100vh" }}>
+    <div className="mesh-gradient integrations-public" style={{ minHeight: "100vh" }}>
       <PublicNavbar />
-      <main className="px-4 py-16 md:py-24" style={{ maxWidth: 960, margin: "0 auto" }}>
-        <p className="eyebrow">Integrations</p>
-        <h1 className="gradient-text" style={{ fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 800, letterSpacing: "-0.04em", marginBottom: 16 }}>
-          Tools for any app. Built when you need them.
-        </h1>
-        <p style={{ fontSize: 20, color: "var(--text-secondary)", maxWidth: 680, marginBottom: 40, lineHeight: 1.6 }}>
-          AgentOS does not ship a fixed catalog. Describe an API, paste a docs URL, or drop an OpenAPI spec.
-          The MCP factory normalizes, probes live, registers tools, and the automation agent can call them in the same run.
-        </p>
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 56 }}>
-          <Link href="/get-started" className="btn btn-primary btn-lg">Open workspace</Link>
-          <Link href="/dashboard/integrations/create" className="btn btn-secondary btn-lg">Create an MCP</Link>
-        </div>
-
-        <div className="flow-diagram glass-panel" style={{ padding: 28, marginBottom: 48 }}>
-          <div className="flow-row">
-            {["Docs / spec / prompt", "Normalize", "Live probe", "Register MCP", "Agent uses tools"].map((step, i) => (
-              <div key={step} className="flow-node">
-                <span className="flow-index">0{i + 1}</span>
-                <span>{step}</span>
+      <main className="integration-page-main">
+        <section className="integration-hero" data-scroll-reveal>
+          <div className="integration-hero-copy">
+            <p className="eyebrow">A connector is a result of the work</p>
+            <h1 style={{ fontFamily: "var(--font-serif)", fontWeight: 500, letterSpacing: "-.035em" }}>Start with the task.<br /><em>Build the connection it needs.</em></h1>
+            <p className="integration-lead">
+              Sandtable can build a connector from an API contract, documentation, or a clear description. It validates the tools before a workflow can use them, and asks you before sensitive actions.
+            </p>
+            <div className="integration-hero-actions">
+              <Link href="/get-started" className="btn btn-primary btn-lg">Open workspace <span aria-hidden="true">↗</span></Link>
+              <Link href="/dashboard/integrations/create" className="btn btn-secondary btn-lg">Build a connector</Link>
+            </div>
+            <p className="integration-note">Examples below are build paths, not pre-connected accounts.</p>
+          </div>
+          <div className="integration-console glass-panel" aria-label="Connector build stages" data-scroll-reveal>
+            <div className="integration-console-head"><span>CONNECTOR WORKBENCH</span><span>Review before enable</span></div>
+            <div className="integration-console-title">A tool grows from a real contract</div>
+            {BUILD_PATHS.map((step) => (
+              <div className="integration-console-step" key={step.number}>
+                <span className="integration-step-number">{step.number}</span>
+                <div><strong>{step.title}</strong><small>{step.detail}</small></div>
+                <span className="integration-step-tag">{step.method}</span>
               </div>
             ))}
+            <div className="integration-console-foot"><span className="integration-state-dot" />Build state and test results appear here during a real request.</div>
           </div>
-        </div>
+        </section>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {APPS.map((app) => (
-            <div key={app.name} className="glass-panel" style={{ padding: 24 }}>
-              <h2 style={{ fontSize: 20, margin: "0 0 8px" }}>{app.name}</h2>
-              <p style={{ margin: 0, color: "var(--text-secondary)" }}>{app.use}</p>
-            </div>
-          ))}
-        </div>
+        <section className="integration-examples" data-scroll-reveal>
+          <div className="integration-section-head">
+            <div><p className="eyebrow">Choose an entry point</p><h2>Different systems. One careful path.</h2></div>
+            <Link href="/dashboard/integrations/create" className="integration-text-link">Open connector builder <span aria-hidden="true">→</span></Link>
+          </div>
+          <div className="integration-method-grid">
+            {EXAMPLES.map((example) => (
+              <Link className="integration-method-card glass-panel" href="/dashboard/integrations/create" key={example.name}>
+                <div className="integration-method-top"><span className="integration-method-icon">{example.icon}</span><span className="integration-method-tag">{example.tags}</span></div>
+                <h3>{example.name}</h3><p>{example.description}</p>
+                <span className="integration-method-action">Build for a workflow <span aria-hidden="true">↗</span></span>
+              </Link>
+            ))}
+          </div>
+        </section>
       </main>
     </div>
   );

@@ -32,6 +32,7 @@ class NotificationType(str, Enum):
     MCP_CREATED = "MCP_CREATED"
     SELF_HEALING = "SELF_HEALING"
     TOKEN_WARNING = "TOKEN_WARNING"
+    SCHEDULE_SKIPPED = "SCHEDULE_SKIPPED"
     SYSTEM = "SYSTEM"
 
 
@@ -66,7 +67,9 @@ class NotificationService:
         await svc.notify_workflow_completed(user_id, run_id, goal)
     """
 
-    def __init__(self, notification_repo):
+    def __init__(self, notification_repo=None):
+        # None → log-only mode: events are recorded but not persisted. Used by
+        # callers (e.g. the workflow engine) that run before a repo is handy.
         self.repo = notification_repo
 
     async def create(
@@ -78,8 +81,12 @@ class NotificationService:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Create a notification. Returns notification_id."""
-        notification_id = await self.repo.create_notification({
-            "id": str(uuid.uuid4()),
+        notification_id = str(uuid.uuid4())
+        if self.repo is None:
+            logger.info(f"[NOTIFY log-only] {notification_type} for user {user_id[:8]}...: {title}")
+            return notification_id
+        await self.repo.create_notification({
+            "id": notification_id,
             "user_id": user_id,
             "type": notification_type,
             "title": title,

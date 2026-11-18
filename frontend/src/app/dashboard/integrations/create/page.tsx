@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   buildIntegrationFromURL,
@@ -8,21 +8,58 @@ import {
   buildIntegrationFromWebsite,
   buildIntegrationFromSpec,
   getIntegrationBuild,
-  storeCredential,
+  subscribeBuildEvents,
+  attachIntegrationKey,
+  AdmissionErrorBody,
+  admissionBodyFrom,
+  listDeclaredApps,
+  installDeclaredApp,
+  DeclaredApp,
 } from "@/lib/api";
+import AdmissionNotice from "@/components/AdmissionNotice";
 
 type Method = "url" | "spec" | "website" | "prompt";
 
 export default function CreateIntegrationPage() {
   const router = useRouter();
+  const stopStream = useRef<(() => void) | null>(null);
+  const observation = useRef<AbortController | null>(null);
+  useEffect(() => () => { stopStream.current?.(); observation.current?.abort(); }, []);
   const [method, setMethod] = useState<Method>("url");
   const [name, setName] = useState("");
   const [input, setInput] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [admissionError, setAdmissionError] = useState<AdmissionErrorBody | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [success, setSuccess] = useState(false);
+  // §27.6: declared supported apps install through the catalog path —
+  // never through the custom prompt flow. A declaration is not proof:
+  // per-operation readiness comes from the install's build records.
+  const [declaredApps, setDeclaredApps] = useState<DeclaredApp[]>([]);
+  const [installingApp, setInstallingApp] = useState<string | null>(null);
+
+  useEffect(() => {
+    listDeclaredApps()
+      .then((r) => setDeclaredApps(r.apps || []))
+      .catch(() => setDeclaredApps([]));
+  }, []);
+
+  async function installApp(app: DeclaredApp) {
+    setError("");
+    setInstallingApp(app.app_id);
+    try {
+      const started = await installDeclaredApp(app.app_id);
+      if (started.build_id) {
+        router.push(`/dashboard/integrations?build=${encodeURIComponent(started.build_id)}`);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Install failed");
+    } finally {
+      setInstallingApp(null);
+    }
+  }
 
   const labels: Record<Method, string> = {
     url: "OpenAPI / docs URL",
@@ -36,9 +73,13 @@ export default function CreateIntegrationPage() {
     if (!input.trim()) return;
 
     setError("");
+    setAdmissionError(null);
     setLoading(true);
     setLogs(["Initializing MCP Factory Agent...", `Building from ${method}...`]);
     setSuccess(false);
+    observation.current?.abort();
+    const controller = new AbortController();
+    observation.current = controller;
 
     try {
       let res;
@@ -53,15 +94,31 @@ export default function CreateIntegrationPage() {
       }
 
       const buildId = res.build_id;
+      if (controller.signal.aborted) return;
       if (buildId) {
-        for (let i = 0; i < 120; i++) {
-          const build = await getIntegrationBuild(buildId);
+        stopStream.current?.();
+        stopStream.current = subscribeBuildEvents(buildId, build => {
+          setLogs(build.logs || [`Stage: ${build.stage}`]);
+        });
+        for (let i = 0; i < 900; i++) {
+          if (controller.signal.aborted) return;
+          const build = await getIntegrationBuild(buildId, controller.signal);
+          if (controller.signal.aborted) return;
           setLogs(build.logs?.length ? build.logs : [`Stage: ${build.stage}`]);
           if (build.status === "success") {
-            setLogs((prev) => [...build.logs, "✅ " + (build.message || res.message || "Registered")]);
-            if (apiKey.trim() && name.trim()) {
-              await storeCredential(name.trim().replace(/\s+/g, "-").toLowerCase(), { api_key: apiKey.trim() });
-              setLogs((prev) => [...prev, "🔑 API key stored in Vault (names only; value encrypted)."]);
+            setSuccess(true);
+            setLogs([...(build.logs || []), "✅ " + (build.message || res.message || "Registered")]);
+            if (apiKey.trim() && build.mcp_id) {
+              try {
+                await attachIntegrationKey(build.mcp_id, apiKey.trim());
+                if (controller.signal.aborted) return;
+                setApiKey("");
+                setLogs((prev) => [...prev, "🔑 API key stored in Vault (names only; value encrypted)."]);
+              } catch {
+                if (controller.signal.aborted) return;
+                setError("Integration built. Credential connection failed; open this integration to reconnect and test it.");
+                setLogs((prev) => [...prev, "Credential connection needs attention. The integration is already registered."]);
+              }
             }
             setSuccess(true);
             return;
@@ -71,16 +128,25 @@ export default function CreateIntegrationPage() {
           }
           await new Promise((r) => setTimeout(r, 1000));
         }
-        throw new Error("Build timed out");
+        throw new Error("Build is still running. Open Integrations to check its status.");
       }
 
       setLogs((prev) => [...prev, "✅ " + res.message]);
       setSuccess(true);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Factory failed to build integration");
+      if (controller.signal.aborted) return;
+      // Phase 3 §3.19: admission refusals (rate/capacity/queue/duplicate)
+      // get the precise overload state; the user's input is PRESERVED.
+      const admission = admissionBodyFrom(err);
+      if (admission) {
+        setAdmissionError(admission);
+      } else {
+        setError(err instanceof Error ? err.message : "Factory failed to build integration");
+      }
       setLogs((prev) => [...prev, "❌ Build Failed"]);
     } finally {
-      setLoading(false);
+      stopStream.current?.();
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
@@ -92,21 +158,42 @@ export default function CreateIntegrationPage() {
   ];
 
   return (
-    <div className="animate-fade-in" style={{ maxWidth: 1000, margin: "0 auto", display: "flex", gap: 32, flexWrap: "wrap" }}>
+    <div className="animate-fade-in" data-scroll-reveal style={{ maxWidth: 1000, margin: "0 auto", display: "flex", gap: 32, flexWrap: "wrap" }}>
       <div style={{ flex: "1 1 400px" }}>
         <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 8 }}>Build New Integration</h1>
         <p style={{ color: "var(--text-secondary)", marginBottom: 32 }}>
           HTTP APIs become MCP tools from OpenAPI. Sites without an API get origin-locked browser tools — not a hidden REST API.
         </p>
 
+        <section aria-label="Connect an application" style={{marginBottom: 24}}>
+          <h2 style={{fontSize: 16}}>Connect an app</h2>
+          <div style={{display: "flex", gap: 8, flexWrap: "wrap"}}>
+            {declaredApps.map((app) => (
+              <button key={app.app_id} type="button" className="btn btn-secondary"
+                title={`${app.name} ${app.version} · ${app.publisher} · tested: ${app.tested_operations.join(", ") || "none"}`}
+                disabled={installingApp === app.app_id || loading}
+                onClick={() => void installApp(app)}>
+                {installingApp === app.app_id ? "Installing…" : app.name}
+              </button>
+            ))}
+            <button type="button" className="btn btn-secondary" disabled={loading} onClick={() => {
+              setMethod("prompt"); setName(""); setSuccess(false); setError("");
+              setInput("Create tools for a custom app using its official public API. I need to: ");
+            }}>Custom App</button>
+          </div>
+          <p style={{fontSize: 12, color: "var(--text-secondary)"}}>
+            Declared apps install through the catalog (build + tested operations per app); a custom app uses the generation flow below. Authentication may require an API token or OAuth setup.
+          </p>
+        </section>
         <div className="glass-card glass-lift" style={{ padding: 24 }}>
           <div style={{ display: "flex", flexWrap: "wrap", background: "var(--bg-tertiary)", padding: 4, borderRadius: "var(--radius-md)", marginBottom: 24, gap: 4 }}>
             {tabs.map((tab) => (
               <button
                 key={tab.id}
+                disabled={loading}
                 className="btn btn-ghost"
                 style={{ flex: "1 1 110px", background: method === tab.id ? "var(--bg-card)" : "transparent", color: method === tab.id ? "var(--text-primary)" : "var(--text-secondary)" }}
-                onClick={() => { setMethod(tab.id); setInput(""); }}
+                onClick={() => { setMethod(tab.id); setInput(""); setSuccess(false); setError(""); }}
                 type="button"
               >
                 {tab.label}
@@ -115,6 +202,14 @@ export default function CreateIntegrationPage() {
           </div>
 
           <form onSubmit={handleSubmit}>
+            {admissionError && (
+              <div style={{ marginBottom: 20 }}>
+                <AdmissionNotice
+                  error={admissionError}
+                  onRetry={() => { setAdmissionError(null); void handleSubmit(new Event("submit") as unknown as React.FormEvent); }}
+                />
+              </div>
+            )}
             {error && (
               <div style={{
                 padding: "12px 16px", marginBottom: 20,
@@ -253,7 +348,7 @@ export default function CreateIntegrationPage() {
             padding: 16, fontFamily: "var(--font-mono)", fontSize: 13,
             color: "#a0a0a0", overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 6
           }}>
-            <div style={{ color: "#555", marginBottom: 12 }}>AgentOS MCP Factory</div>
+            <div style={{ color: "#555", marginBottom: 12 }}>Sandtable MCP Factory</div>
             {logs.map((log, i) => (
               <div key={i} className="animate-slide-in">
                 <span style={{ color: "#27c93f", marginRight: 8 }}>➜</span>

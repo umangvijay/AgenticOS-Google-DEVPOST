@@ -9,18 +9,19 @@ POST /api/v1/workflows/{id}/cancel  — Cancel a running workflow
 POST /api/v1/workflows/{id}/retry   — Retry a failed workflow
 """
 
+import hashlib
 import uuid
 import json
 import asyncio
 import logging
-import traceback
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Request, Depends, status
+from fastapi import APIRouter, HTTPException, Request, Depends, status, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend.api.dependencies.auth import get_current_user, AuthenticatedUser, require_not_viewer
+from backend.security.json_safety import safe_json_dumps
 from backend.security.input_sanitizer import sanitize_goal, InputValidationError
 from backend.security.rate_limiter import check_rate_limit
 from backend.security.rbac import require_resource_owner
@@ -30,6 +31,92 @@ from backend.engine.repo_adapter import maybe_await
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
+
+
+# ── §15.25: the multi-agent workspace API ──────────────────────────────
+
+async def _owned_run(factory, run_id: str, user: AuthenticatedUser):
+    run = await factory.workflow_repo.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if run.get("user_id") != user.user_id and not user.is_admin():
+        raise HTTPException(status_code=403, detail="Access denied")
+    return run
+
+
+@router.get("/{run_id}/delegations")
+async def run_delegations(run_id: str, request: Request,
+                          user: AuthenticatedUser = Depends(get_current_user)):
+    """§15.25: the workspace panel's data — the run's specialist tree
+    with responsibilities, states, budgets, and evidence keys."""
+    factory = _get_factory(request)
+    await _owned_run(factory, run_id, user)
+    repo = getattr(factory, "agent_task_repo", None)
+    if repo is None:
+        return {"delegations": [], "available": False, "run_id": run_id}
+    roots = await repo.children_of(run_id)
+    by_id, all_contracts = {}, []
+    frontier = list(roots)
+    while frontier:
+        c = frontier.pop(0)
+        if c.contract_id in by_id:
+            continue
+        by_id[c.contract_id] = c
+        all_contracts.append(c)
+        frontier.extend(await repo.children_of(c.contract_id))
+    from backend.services.agent_task_contracts import SPECIALIST_REGISTRY
+    from backend.models.agent_task import AgentRole
+    out = []
+    for c in all_contracts:
+        try:
+            entry = SPECIALIST_REGISTRY.get(AgentRole(c.role.value), {})
+        except ValueError:
+            entry = {}
+        out.append({
+            "contract_id": c.contract_id, "parent_id": c.parent_id,
+            "role": c.role.value,
+            "title": entry.get("title", c.role.value),
+            "responsibility": entry.get("boundary", ""),
+            "goal": c.goal, "state": c.state.value,
+            "budget_units": c.budget_units, "spent_units": c.spent_units,
+            "deadline_at": c.deadline_at, "depth": c.depth,
+            "result_keys": sorted((c.result or {}).keys()),
+            "error": c.error})
+    out.sort(key=lambda d: (d["depth"], d["contract_id"]))
+    return {"delegations": out, "available": True, "run_id": run_id}
+
+
+@router.post("/{run_id}/delegations/{contract_id}/cancel")
+async def cancel_delegation(run_id: str, contract_id: str,
+                            request: Request,
+                            user: AuthenticatedUser = Depends(require_not_viewer)):
+    """§15.16/§15.25: cancel ONE delegated task (propagating to ITS
+    children) without touching the rest of the workflow."""
+    factory = _get_factory(request)
+    await _owned_run(factory, run_id, user)
+    repo = getattr(factory, "agent_task_repo", None)
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Delegation store unavailable")
+    contract = await repo.get_contract(contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="Delegation not found")
+    # The contract must belong to THIS run's tree (walk its ancestors).
+    cursor_parent = contract.parent_id
+    chain = [cursor_parent]
+    for _ in range(8):
+        if cursor_parent == run_id:
+            break
+        pc = await repo.get_contract(cursor_parent)
+        if pc is None:
+            break
+        cursor_parent = pc.parent_id
+        chain.append(cursor_parent)
+    if run_id not in chain and contract.parent_id != run_id:
+        raise HTTPException(status_code=404, detail="Delegation not in this run")
+    from backend.services.agent_contracts import cancel as cancel_contract
+    out = await cancel_contract(contract_id, actor=f"user:{user.user_id}",
+                                repo=repo)
+    return out
 
 
 def _get_factory(request: Request):
@@ -51,6 +138,13 @@ class GoalRequest(BaseModel):
     attachments: List[GoalAttachment] = []
     parent_run_id: Optional[str] = None
     thread_id: Optional[str] = None
+    model: Optional[str] = None
+
+
+def _task_title(t_def) -> str:
+    """Human-readable task title for the timeline and details UI."""
+    from backend.engine.task_titles import task_title
+    return task_title(t_def)
 
 
 def _as_run_dict(run) -> Optional[dict]:
@@ -96,6 +190,47 @@ async def _thread_runs(factory, user_id: str, thread_id: str) -> list:
     return out
 
 
+async def _persist_failed_attempt(factory, run_id: str, workflow_id: str, user_id: str,
+                                  goal: str, thread_id: str, parent_run_id: Optional[str]) -> None:
+    """Keep the user's prompt in history when planning/execution fails."""
+    try:
+        existing = await factory.workflow_repo.get_run(run_id)
+        failure_task = {
+            "task_id": f"planning-{run_id[:12]}",
+            "workflow_id": workflow_id,
+            "run_id": run_id,
+            "user_id": user_id,
+            "agent": "IntentAgent",
+            "status": "FAILED",
+            "input_data": {},
+            "error": "The request was saved, but planning could not complete. Check model access and try again.",
+        }
+        if existing:
+            await factory.workflow_repo.update_run_status(run_id, "FAILED")
+            if not existing.get("tasks"):
+                await factory.workflow_repo.save_task(failure_task)
+        else:
+            await factory.workflow_repo.save_run({
+                "run_id": run_id,
+                "workflow_id": workflow_id,
+                "user_id": user_id,
+                "goal": goal,
+                "status": "FAILED",
+                "parent_run_id": parent_run_id,
+                "thread_id": thread_id,
+                "tasks": [failure_task],
+            })
+        await factory.workflow_repo.save_event({
+            "event_id": str(uuid.uuid4()),
+            "type": "WORKFLOW_FAILED",
+            "workflow_id": workflow_id,
+            "run_id": run_id,
+            "summary": "The request was saved, but planning or execution failed.",
+        })
+    except Exception:
+        logger.exception("Could not persist failed workflow history for %s", run_id)
+
+
 # ══════════════════════════════════════════════════════════════════
 #  CREATE WORKFLOW
 # ══════════════════════════════════════════════════════════════════
@@ -116,8 +251,28 @@ async def create_workflow(
         raise HTTPException(status_code=500, detail="Workflow engine not initialized")
 
     check_rate_limit(f"user:{user.user_id}", "workflow")
-    from backend.services.llm_context import load_user_llm_keys
+    # Phase 3 §3.10: workflow creation is expensive, capacity-owning work —
+    # enforce the allowance SHARED across replicas, failing closed (503) when
+    # the admission store is down rather than silently multiplying limits.
+    from backend.security.rate_limiter import check_shared_rate_limit
+    await check_shared_rate_limit(f"user:{user.user_id}", group="workflow")
+    # Cost guardrail: a hard stop once the user's daily token budget is spent.
+    from backend.services.llm_context import load_user_llm_keys, check_user_budget
+    budget = await check_user_budget(factory.settings_repo, user.user_id)
+    if budget and budget.get("exceeded"):
+        raise HTTPException(
+            status_code=429,
+            detail="Daily token budget exhausted "
+                   f"({budget.get('used', 0)}/{budget.get('limit', 0)} tokens). "
+                   "Raise the limit in Settings or wait for the window to reset; "
+                   "live actions that don't need the planner (site health, GET a URL) still work.",
+        )
     await load_user_llm_keys(factory.secrets_repo, user.user_id)
+    from backend.services.llm_context import load_user_model
+    try:
+        selected_model = await load_user_model(factory.settings_repo, user.user_id, body.model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     try:
         goal = sanitize_goal(body.goal)
@@ -157,7 +312,60 @@ async def create_workflow(
         if not parent or (parent.get("user_id") != user.user_id and not user.is_admin()):
             raise HTTPException(status_code=400, detail="Invalid parent conversation.")
 
-    run_id = str(uuid.uuid4())
+    # C5/C16 (§5.0 Batch A/E): ordinary workflow creation goes through the
+    # SAME command-acceptance contract — the durable command commits BEFORE
+    # planning starts, keyed by the client's Idempotency-Key (C16), and the
+    # response carries the receipt so unknown acceptance is resolvable.
+    from backend.services.command_service import accept_command
+    from backend.config.settings import settings as app_settings
+    idempotency_key = request.headers.get("Idempotency-Key")
+    pre_run_id = str(uuid.uuid4())
+    receipt = await accept_command(
+        command_type="workflow",
+        owner_user_id=user.user_id,
+        actor_type="user",
+        source="api",
+        idempotency_key=idempotency_key,
+        request_digest=hashlib.sha256(json.dumps(
+            {"goal": body.goal[:4000], "model": body.model,
+             "thread_id": body.thread_id, "parent_run_id": body.parent_run_id},
+            sort_keys=True).encode()).hexdigest(),
+        payload={"goal": body.goal[:4000], "model": body.model,
+                 "thread_id": body.thread_id, "parent_run_id": body.parent_run_id},
+        run_id=pre_run_id,
+        max_pending_per_user=app_settings.TENANT_MAX_PENDING_COMMANDS,
+        max_wait_seconds=2 * 3600,
+    )
+    if not receipt.accepted:
+        code = receipt.error_code.value if receipt.error_code else "REJECTED"
+        status_code = 409 if code == "IDEMPOTENCY_CONFLICT" else 429
+        raise HTTPException(status_code=status_code, detail={
+            "code": code, "message": receipt.message or "Command not accepted",
+            "accepted": False, "command_id": receipt.command_id})
+
+    # §10.1 (9.0 carryover): a DEDUPLICATED receipt returns the ORIGINAL
+    # run — the caller must not replan a new run for an already-accepted
+    # command (the C5 defect: dedup continued planning for a different run).
+    if receipt.deduplicated:
+        original_run_id = receipt.run_id or pre_run_id
+        existing = await factory.workflow_repo.get_run(original_run_id)
+        if existing:
+            return {
+                "run_id": original_run_id,
+                "workflow_id": existing.get("workflow_id"),
+                "status": existing.get("status", "PENDING"),
+                "task_count": len(existing.get("tasks") or []),
+                "thread_id": existing.get("thread_id") or body.thread_id,
+                "parent_run_id": body.parent_run_id,
+                "command_id": receipt.command_id,
+                "deduplicated": True,
+                "message": "This exact request was already accepted; returning the original run.",
+            }
+        # Command accepted but the run never materialized (API died between
+        # acceptance and planning): fall through and plan into the SAME
+        # pre-allocated run_id — the command's run_id IS pre_run_id.
+
+    run_id = pre_run_id
     workflow_id = f"wf-{run_id[:8]}"
     thread_id = body.thread_id or (parent.get("thread_id") if parent else None) or (parent.get("run_id") if parent else run_id)
 
@@ -185,7 +393,7 @@ async def create_workflow(
 
             def extract_event_text(events):
                 for event in reversed(events):
-                    if event.output is not None:
+                    if getattr(event, "output", None) is not None:
                         if hasattr(event.output, "model_dump"):
                             return event.output.model_dump()
                         return event.output
@@ -212,21 +420,45 @@ async def create_workflow(
             logger.info(f"[{run_id[:8]}] Intent: {intent_result}")
 
             catalog_blob = json.dumps(live_catalog)
+            enabled_agents = []
+            registry = getattr(request.app.state, "snapshot_registry", None)
+            if registry:
+                snapshot = registry.get_snapshot()
+                for plugin in snapshot.active_plugins:
+                    if plugin.state.value != "ENABLED":
+                        continue
+                    if plugin.manifest.scope.value == "USER" and plugin.installed_by != user.user_id:
+                        continue
+                    enabled_agents.extend(agent.model_dump() for agent in plugin.manifest.agents)
+            agents_blob = json.dumps(enabled_agents)
             plan_events = await gemini_client.run_adk_debug(
-                lambda model: get_planner_agent(catalog_json=catalog_blob, model=model),
-                json.dumps(intent_result),
+                lambda model: get_planner_agent(catalog_json=catalog_blob, model=model, agents_json=agents_blob),
+                json.dumps({"original_goal": goal, "extracted_intent": intent_result}),
                 settings.APP_NAME,
             )
             raw_plan = extract_event_text(plan_events)
 
+            from backend.engine.plan_repair import normalize_plan_field_aliases
             if isinstance(raw_plan, dict):
-                workflow_def = WorkflowDefinition(**raw_plan)
+                workflow_def = WorkflowDefinition(**normalize_plan_field_aliases(raw_plan))
             elif isinstance(raw_plan, str):
-                workflow_def = WorkflowDefinition(**json.loads(raw_plan))
+                workflow_def = WorkflowDefinition(
+                    **normalize_plan_field_aliases(json.loads(raw_plan)))
             else:
                 raise Exception(f"Planner returned unexpected output: {type(raw_plan)}")
 
             workflow_def = enrich_plan_from_intent(workflow_def, intent_result, live_catalog, goal=goal)
+
+            from backend.engine.plan_repair import validate_or_repair
+            async def repair_plan(prompt):
+                repaired_events = await gemini_client.run_adk_debug(
+                    lambda model: get_planner_agent(catalog_json=catalog_blob, model=model),
+                    prompt, settings.APP_NAME,
+                )
+                return extract_event_text(repaired_events)
+            workflow_def = await validate_or_repair(
+                workflow_def, goal=goal, intent=intent_result, catalog=live_catalog, repair=repair_plan,
+            )
 
         if parent and workflow_def:
             ctx = _run_context_text(parent)
@@ -236,6 +468,13 @@ async def create_workflow(
                     t_def.input_data = {
                         **(t_def.input_data or {}),
                         "prompt": f"Earlier in this conversation:\n{ctx}\n\nNew message:\n{prompt}",
+                    }
+                elif (t_def.agent or "").lower().startswith("orchestrator"):
+                    t_goal = str((t_def.input_data or {}).get("goal") or goal)
+                    t_def.input_data = {
+                        **(t_def.input_data or {}),
+                        "goal": t_goal,
+                        "conversation_context": f"Earlier in this conversation:\n{ctx}",
                     }
 
         prepare_dag(workflow_def)
@@ -253,7 +492,8 @@ async def create_workflow(
                 task_id=t_def.task_id, workflow_id=workflow_id,
                 run_id=run_id, user_id=user.user_id,
                 agent=t_def.agent, tool=t_def.tool,
-                input_data=t_def.input_data, dependencies=t_def.dependencies,
+                title=_task_title(t_def),
+                input_data={**t_def.input_data, "_model": selected_model, **({"_agent_id": t_def.agent_id} if t_def.agent_id else {})}, dependencies=t_def.dependencies,
                 timeout_seconds=max(t_def.timeout_seconds, 180) if t_def.agent in ("Orchestrator", "OrchestratorAgent", "core.mcp_build") or "orchestrator" in (t_def.agent or "").lower() else t_def.timeout_seconds,
                 max_retries=t_def.max_retries,
                 recovery_enabled=True,
@@ -264,10 +504,27 @@ async def create_workflow(
         run_dict["tasks"] = [t.model_dump(mode="json") for t in run.tasks]
         await factory.workflow_repo.save_run(run_dict)
 
+        # §29.19: bind the ACCEPTED plan version to the run durably via
+        # its start event — the engine refuses to dispatch a loaded plan
+        # that no longer matches what was accepted.
+        from backend.engine.plan_repair import plan_version_hash
         start_event = WorkflowEvent(
             type=WorkflowEventType.WORKFLOW_STARTED,
             workflow_id=workflow_id, run_id=run_id,
             summary=f"Workflow started for goal: {goal}",
+            sanitized_metadata={
+                "plan_version": plan_version_hash(run.tasks),
+                "plan": {
+                    "tasks": [{
+                        "task_id": t.task_id,
+                        "agent": t.agent,
+                        "tool": t.tool,
+                        "dependencies": list(t.dependencies or []),
+                        "timeout_seconds": t.timeout_seconds,
+                        "max_retries": t.max_retries,
+                    } for t in run.tasks],
+                },
+            },
         )
         await factory.workflow_repo.save_event(start_event.model_dump(mode="json"))
 
@@ -280,19 +537,37 @@ async def create_workflow(
 
         await workflow_engine.evaluate_dag(run_id)
 
+        # C16: the receipt carries the command id — unknown acceptance is
+        # resolvable via GET /commands/{id} without resubmission.
         return {
             "run_id": run_id, "workflow_id": workflow_id,
             "status": run.status, "task_count": len(run.tasks),
             "thread_id": thread_id,
             "parent_run_id": body.parent_run_id,
+            "command_id": receipt.command_id,
+            "deduplicated": receipt.deduplicated,
             "message": "Workflow created and executing.",
         }
 
     except DAGValidationError as e:
+        await _persist_failed_attempt(factory, run_id, workflow_id, user.user_id, goal, thread_id, body.parent_run_id)
         raise HTTPException(status_code=400, detail=f"Invalid Plan: {e}")
     except Exception as e:
-        traceback.print_exc()
+        logger.exception("Workflow creation failed for run %s", run_id)
+        await _persist_failed_attempt(factory, run_id, workflow_id, user.user_id, goal, thread_id, body.parent_run_id)
         msg = str(e)
+        _low = msg.lower()
+        if "default credentials" in _low or "adc" in _low or "no api key" in _low or "api_key" in _low and "invalid" not in _low or "gemini api key" in _low:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "No model API key is configured, so this goal can't be planned. "
+                    "Add a key in Settings (Gemini, Groq, xAI, or Hugging Face), or try "
+                    "a live action that doesn't need the planner: check the health of "
+                    "https://example.com, GET a public HTTPS URL, or build an MCP from "
+                    "an OpenAPI spec."
+                ),
+            )
         if "RESOURCE_EXHAUSTED" in msg or "429" in msg or "quota exhausted" in msg.lower() or "UNAUTHENTICATED" in msg or "API_KEY_INVALID" in msg:
             raise HTTPException(
                 status_code=429,
@@ -303,7 +578,8 @@ async def create_workflow(
                     "or build an MCP from an OpenAPI spec."
                 ),
             )
-        raise HTTPException(status_code=500, detail=msg)
+        # Never leak raw provider/internal errors to clients
+        raise HTTPException(status_code=500, detail="Workflow creation failed. Check the run details, or try a live action that does not need the planner.")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -314,7 +590,8 @@ async def create_workflow(
 async def list_workflows(
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
-    limit: int = 50, offset: int = 0,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ):
     """List the authenticated user's workflow runs."""
     factory = _get_factory(request)
@@ -348,12 +625,7 @@ async def get_workflow(
 ):
     """Get a workflow run with all tasks."""
     factory = _get_factory(request)
-    run = await factory.workflow_repo.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    if run.get("user_id") != user.user_id and not user.is_admin():
-        raise HTTPException(status_code=403, detail="Access denied")
-    return run
+    return await _owned_run(factory, run_id, user)
 
 
 @router.get("/{run_id}/events")
@@ -369,8 +641,28 @@ async def stream_events(
     if run.get("user_id") != user.user_id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Access denied")
 
+    # Phase 3 §3.2/§3.10: long-lived SSE connections are a capacity of their
+    # own — the event_stream policy (in-process by design; a DB round-trip
+    # per connect would cost more than the limit protects) bounds how many
+    # streams one identity can open.
+    check_rate_limit(f"user:{user.user_id}", "event_stream")
+
+    # Phase 4 §4.21: reconnect contract — the client's replay cursor
+    # (Last-Event-ID header or ?cursor=) replays retained events after that
+    # point; no cursor starts a fresh stream. Cursor semantics are the
+    # client's dedup authority on replayed events.
+    # §18.15 (finding F6): event IDs are OPAQUE STRINGS end to end — the
+    # integer conversion is removed (repositories key events by string
+    # event_id; converting to int corrupted every UUID cursor into a
+    # fresh stream). An unknown cursor still falls back to the snapshot,
+    # which is the defined gap/reset behavior.
+    replay_cursor = (request.headers.get("last-event-id")
+                     or request.query_params.get("cursor"))
+
     async def event_generator():
-        last_event_id = None
+        last_event_id = replay_cursor
+        if replay_cursor is not None:
+            yield f": replaying after cursor\n\n"
         try:
             yield ": connected\n\n"
             while True:
@@ -380,15 +672,15 @@ async def stream_events(
                     events = await factory.workflow_repo.get_events(run_id, after_event_id=last_event_id)
                 except Exception as exc:
                     logger.exception("SSE get_events failed for run %s", run_id)
-                    yield f"event: error\ndata: {json.dumps({'error': str(exc)[:800]})}\n\n"
+                    yield f"event: error\ndata: {safe_json_dumps({'error': str(exc)[:800]})}\n\n"
                     return
                 for event in events:
                     last_event_id = event.get("event_id")
-                    yield f"id: {last_event_id}\ndata: {json.dumps(event, default=str)}\n\n"
+                    yield f"id: {last_event_id}\ndata: {safe_json_dumps(event)}\n\n"
                 await asyncio.sleep(1)
         except Exception as exc:
             logger.exception("SSE stream failed for run %s", run_id)
-            yield f"event: error\ndata: {json.dumps({'error': str(exc)[:800]})}\n\n"
+            yield f"event: error\ndata: {safe_json_dumps({'error': str(exc)[:800]})}\n\n"
 
     origin = request.headers.get("origin") or ""
     cors = {}
@@ -472,10 +764,11 @@ async def retry_workflow(
     # Reset failed tasks to PENDING
     retried_count = 0
     for task in run.get("tasks", []):
-        if task.get("status") in ("FAILED", "CANCELLED"):
+        if task.get("status") in ("FAILED", "CANCELLED", "BLOCKED"):
+            await factory.idempotency_repo.reset_failed_task(run["workflow_id"], task["task_id"])
             await factory.workflow_repo.update_task(
                 run_id, task["task_id"],
-                {"status": "PENDING", "error": None, "error_type": None, "attempt": 0}
+                {"status": "PENDING", "error": None, "error_type": None}
             )
             retried_count += 1
 
@@ -512,24 +805,25 @@ async def resume_workflow(
     for task in run.get("tasks", []):
         if task.get("status") != "WAITING_APPROVAL":
             continue
+        approvals = await maybe_await(factory.workflow_repo.list_pending_approvals(run["user_id"]))
+        input_data = dict(task.get("input_data") or {})
+        for approval in approvals or []:
+            data = approval if isinstance(approval, dict) else approval.model_dump()
+            if data.get("run_id") == run_id and data.get("task_id") == task["task_id"]:
+                from backend.models.security import ApprovalStatus
+                resolved = await maybe_await(factory.workflow_repo.resolve_approval(
+                    data["approval_id"], ApprovalStatus.APPROVED.value, decision_by=user.user_id
+                ))
+                if not resolved:
+                    raise HTTPException(status_code=409, detail="Approval changed; refresh before resuming")
+                input_data["_approved_request_id"] = data["approval_id"]
+                break
+        await factory.idempotency_repo.reset_failed_task(run["workflow_id"], task["task_id"])
         await factory.workflow_repo.update_task(
             run_id, task["task_id"],
-            {"status": "PENDING", "error": None},
+            {"status": "PENDING", "error": None, "input_data": input_data},
         )
         resumed += 1
-        try:
-            approvals = await maybe_await(factory.workflow_repo.list_pending_approvals(user.user_id))
-            for approval in approvals or []:
-                aid = approval.get("approval_id") if isinstance(approval, dict) else getattr(approval, "approval_id", None)
-                tid = approval.get("task_id") if isinstance(approval, dict) else getattr(approval, "task_id", None)
-                rid = approval.get("run_id") if isinstance(approval, dict) else getattr(approval, "run_id", None)
-                if rid == run_id and tid == task["task_id"] and aid:
-                    from backend.models.security import ApprovalStatus
-                    await maybe_await(factory.workflow_repo.resolve_approval(
-                        aid, ApprovalStatus.APPROVED.value, decision_by=user.user_id
-                    ))
-        except Exception:
-            logger.exception("Could not auto-resolve approval on resume")
 
     if resumed == 0:
         raise HTTPException(status_code=400, detail="No paused tasks to resume")

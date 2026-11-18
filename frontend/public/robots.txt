@@ -1,0 +1,6 @@
+# Veyrune robots.txt
+# Marketing pages are public; the dashboard is a private app surface.
+
+User-agent: *
+Allow: /
+Disallow: /dashboard

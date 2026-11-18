@@ -3,6 +3,7 @@ Public contact form. Persists every message and emails CONTACT_TO_EMAIL via SMTP
 """
 
 import json
+import asyncio
 import logging
 import os
 import smtplib
@@ -16,17 +17,16 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from backend.config.settings import settings
-from backend.security.rate_limiter import check_rate_limit, get_client_identifier
+from backend.security.rate_limiter import check_rate_limit, check_shared_rate_limit, get_client_identifier
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/contact", tags=["contact"])
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-INBOX_PATH = PROJECT_ROOT / "data" / "contact_inbox.json"
 ENV_PATH = PROJECT_ROOT / ".env"
 
 
@@ -89,6 +89,7 @@ def _contact_cfg() -> dict:
 
 
 class ContactRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
     email: str = Field(min_length=5, max_length=254)
     message: str = Field(min_length=1, max_length=8000)
     name: str = Field(default="", max_length=120)
@@ -96,20 +97,6 @@ class ContactRequest(BaseModel):
 
 def _contact_to() -> str:
     return _contact_cfg()["to"]
-
-
-def _append_inbox(payload: dict) -> None:
-    INBOX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    existing = []
-    if INBOX_PATH.exists():
-        try:
-            existing = json.loads(INBOX_PATH.read_text())
-            if not isinstance(existing, list):
-                existing = []
-        except Exception:
-            existing = []
-    existing.insert(0, payload)
-    INBOX_PATH.write_text(json.dumps(existing[:500], indent=2))
 
 
 def _smtp_error_reason(exc: Exception) -> str:
@@ -212,7 +199,8 @@ def _send_resend(subject: str, body: str, reply_to: str) -> bool:
 
 @router.post("")
 async def submit_contact(body: ContactRequest, request: Request):
-    check_rate_limit(get_client_identifier(request), "general")
+    check_rate_limit(get_client_identifier(request), "contact")
+    await check_shared_rate_limit(get_client_identifier(request), group="contact")
     if "@" not in body.email or "." not in body.email.split("@")[-1]:
         raise HTTPException(status_code=400, detail="Please enter a valid email address.")
     to_addr = _contact_to()
@@ -224,7 +212,7 @@ async def submit_contact(body: ContactRequest, request: Request):
         "to": to_addr,
     }
     try:
-        _append_inbox(record)
+        await request.app.state.factory.content_repo.create("contact", record)
     except Exception as exc:
         logger.error("Failed to persist contact message: %s", exc)
         raise HTTPException(status_code=500, detail="Could not save your message.")
@@ -235,16 +223,16 @@ async def submit_contact(body: ContactRequest, request: Request):
     via = None
     reason = None
 
-    delivered, reason = _send_smtp(subject, text, str(body.email))
+    delivered, reason = await asyncio.to_thread(_send_smtp, subject, text, str(body.email))
     if delivered:
         via = "smtp"
         reason = None
     else:
-        if _send_resend(subject, text, str(body.email)):
+        if await asyncio.to_thread(_send_resend, subject, text, str(body.email)):
             delivered = True
             via = "resend"
             reason = None
-        elif _send_webhook(subject, text, str(body.email), body.name):
+        elif await asyncio.to_thread(_send_webhook, subject, text, str(body.email), body.name):
             delivered = True
             via = "webhook"
             reason = None

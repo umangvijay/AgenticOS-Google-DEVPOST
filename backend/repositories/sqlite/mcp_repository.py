@@ -23,14 +23,15 @@ class SQLiteMCPRepository(BaseMCPRepository):
     async def register_mcp(self, manifest_data: Dict[str, Any]) -> None:
         now = datetime.now(timezone.utc).isoformat()
         m = manifest_data
-        await self.db.execute(
+        cursor = await self.db.execute(
             """
             INSERT INTO mcps (
                 mcp_id, name, version, endpoint, transport, auth_json, scopes,
                 health, health_updated_at, state, spec_hash, spec_version,
                 source_uri, built_at, owner, is_enabled, created_at, updated_at,
-                description, trust_tier, source_type, spec_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                description, trust_tier, source_type, spec_json, is_public,
+                artifact_type, test_coverage_json, capabilities_omitted, spec_provenance, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(mcp_id) DO UPDATE SET
                 name = excluded.name,
                 version = excluded.version,
@@ -49,7 +50,14 @@ class SQLiteMCPRepository(BaseMCPRepository):
                 trust_tier = excluded.trust_tier,
                 source_type = excluded.source_type,
                 spec_json = excluded.spec_json,
+                is_public = excluded.is_public,
+                artifact_type = excluded.artifact_type,
+                test_coverage_json = excluded.test_coverage_json,
+                capabilities_omitted = excluded.capabilities_omitted,
+                spec_provenance = excluded.spec_provenance,
+                metadata_json = excluded.metadata_json,
                 updated_at = excluded.updated_at
+            WHERE mcps.owner = excluded.owner
             """,
             (
                 m["mcp_id"],
@@ -74,9 +82,17 @@ class SQLiteMCPRepository(BaseMCPRepository):
                 m.get("trust_tier", "pending_review"),
                 m.get("source_type", "openapi"),
                 m.get("spec_json"),
+                1 if m.get("is_public", False) else 0,
+                m.get("artifact_type", "adapter"),
+                json.dumps(m.get("test_coverage") or {}),
+                int(m.get("capabilities_omitted") or 0),
+                m.get("spec_provenance", "official_spec"),
+                json.dumps(m.get("metadata") or {}),
             ),
         )
         await self.db.commit()
+        if not cursor.rowcount:
+            raise PermissionError("Connector belongs to another owner")
 
     async def get_mcp(self, mcp_id: str) -> Optional[Dict[str, Any]]:
         row = await self.db.fetch_one("SELECT * FROM mcps WHERE mcp_id = ?", (mcp_id,))
@@ -101,10 +117,20 @@ class SQLiteMCPRepository(BaseMCPRepository):
 
     async def set_mcp_enabled(self, mcp_id: str, enabled: bool) -> None:
         await self.db.execute(
-            "UPDATE mcps SET is_enabled = ?, updated_at = ? WHERE mcp_id = ?",
+            "UPDATE mcps SET is_enabled = ?, metadata_json = json_remove(metadata_json, '$.pending_publication_token'), updated_at = ? WHERE mcp_id = ?",
             (1 if enabled else 0, datetime.now(timezone.utc).isoformat(), mcp_id),
         )
         await self.db.commit()
+
+    async def publish_managed_candidate(self, mcp_id, *, owner, revision_id, publication_token, metadata):
+        cursor = await self.db.execute(
+            "UPDATE mcps SET is_enabled=1, trust_tier='verified', metadata_json=?, updated_at=? "
+            "WHERE mcp_id=? AND owner=? AND active_revision_id=? AND is_enabled=0 "
+            "AND json_extract(metadata_json, '$.pending_publication_token')=?",
+            (json.dumps(metadata), datetime.now(timezone.utc).isoformat(), mcp_id,
+             owner, revision_id, publication_token))
+        await self.db.commit()
+        return cursor.rowcount == 1
 
     async def update_mcp_auth(self, mcp_id: str, auth: Dict[str, Any]) -> None:
         await self.db.execute(
@@ -119,6 +145,21 @@ class SQLiteMCPRepository(BaseMCPRepository):
             (state, datetime.now(timezone.utc).isoformat(), mcp_id),
         )
         await self.db.commit()
+
+    async def list_public_mcps(self) -> List[Dict[str, Any]]:
+        """Shared catalog: every published integration, for any authenticated user."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM mcps WHERE is_public = 1 ORDER BY updated_at DESC"
+        )
+        return [dict(r) for r in rows]
+
+    async def set_public(self, mcp_id: str, is_public: bool) -> bool:
+        cursor = await self.db.execute(
+            "UPDATE mcps SET is_public = ?, updated_at = ? WHERE mcp_id = ?",
+            (1 if is_public else 0, datetime.now(timezone.utc).isoformat(), mcp_id),
+        )
+        await self.db.commit()
+        return cursor.rowcount > 0
 
     async def delete_mcp(self, mcp_id: str) -> bool:
         conn = await self.db.connection()
@@ -195,8 +236,11 @@ class SQLiteMCPRepository(BaseMCPRepository):
             """
             INSERT INTO mcp_builds (
                 build_id, user_id, name, method, source, status, stage,
-                logs_json, mcp_id, tools_json, error, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                logs_json, mcp_id, tools_json, error,
+                origin, parent_run_id, parent_workflow_id, parent_task_id,
+                wait_reason, organization_id, credential_reference,
+                required_operations_json, intake_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 build["build_id"],
@@ -210,6 +254,15 @@ class SQLiteMCPRepository(BaseMCPRepository):
                 build.get("mcp_id"),
                 json.dumps(build.get("tools") or []),
                 build.get("error"),
+                build.get("origin"),
+                build.get("parent_run_id"),
+                build.get("parent_workflow_id"),
+                build.get("parent_task_id"),
+                build.get("wait_reason"),
+                build.get("organization_id"),
+                build.get("credential_reference"),
+                json.dumps(build.get("required_operations") or []),
+                json.dumps(build.get("intake") or {}),
                 now,
                 now,
             ),
@@ -222,6 +275,7 @@ class SQLiteMCPRepository(BaseMCPRepository):
         mapping = {
             "logs": "logs_json",
             "tools": "tools_json",
+            "intake": "intake_json",
         }
         set_clauses = []
         values = []
@@ -251,6 +305,14 @@ class SQLiteMCPRepository(BaseMCPRepository):
         r = dict(row)
         r["logs"] = json.loads(r.pop("logs_json", "[]") or "[]")
         r["tools"] = json.loads(r.pop("tools_json", "[]") or "[]")
+        # §13.3: the declared required operations ride with the build.
+        r["required_operations"] = json.loads(
+            r.pop("required_operations_json", "[]") or "[]")
+        # §29.14: the application-intake record rides with the build.
+        try:
+            r["intake"] = json.loads(r.pop("intake_json", "{}") or "{}")
+        except ValueError:
+            r["intake"] = {}
         return r
 
     @staticmethod
@@ -259,6 +321,7 @@ class SQLiteMCPRepository(BaseMCPRepository):
             return None
         result = dict(row)
         result["auth"] = json.loads(result.pop("auth_json", None) or "{}")
+        result["metadata"] = json.loads(result.pop("metadata_json", None) or "{}")
         scopes_raw = result.get("scopes") or "[]"
         if isinstance(scopes_raw, str):
             try:
@@ -268,4 +331,87 @@ class SQLiteMCPRepository(BaseMCPRepository):
         elif not isinstance(scopes_raw, list):
             result["scopes"] = []
         result["is_enabled"] = bool(result.get("is_enabled", 1))
+        # Connector evidence fields (audit G02/G06/G03): deserialize the
+        # coverage summary; default old rows to the adapter product.
+        result.setdefault("artifact_type", "adapter")
+        result.setdefault("spec_provenance", "official_spec")
+        coverage_raw = result.pop("test_coverage_json", None)
+        if isinstance(coverage_raw, str):
+            try:
+                result["test_coverage"] = json.loads(coverage_raw)
+            except json.JSONDecodeError:
+                result["test_coverage"] = {}
+        else:
+            result["test_coverage"] = coverage_raw or {}
+        result["capabilities_omitted"] = int(result.get("capabilities_omitted") or 0)
         return result
+
+    async def save_validation_run(self, connector_id: str, run: dict) -> None:
+        """Phase 6 §6.8: durable validation-run records (idempotent upsert)."""
+        import json as _json
+        await self.db.execute(
+            """
+            INSERT INTO connector_validation_runs
+                (validation_run_id, connector_id, revision_id, operation_id,
+                 operation_digest, credential_binding_id, authorization_epoch,
+                 provider_account_id, environment, runtime_digest,
+                 validation_profile_version, case_results_json, started_at,
+                 completed_at, valid_until, artifact_references_json, status,
+                 superseded_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(validation_run_id) DO UPDATE SET
+                case_results_json=excluded.case_results_json,
+                completed_at=excluded.completed_at,
+                status=excluded.status,
+                superseded_reason=excluded.superseded_reason
+            """,
+            (run.get("validation_run_id"), connector_id,
+             run.get("revision_id"), run.get("operation_id"),
+             run.get("operation_digest"), run.get("credential_binding_id"),
+             run.get("authorization_epoch", "e0"),
+             run.get("provider_account_id"), run.get("environment", "production"),
+             run.get("runtime_digest"), run.get("validation_profile_version",
+                                                "p6.read.v1"),
+             _json.dumps(run.get("case_results") or []),
+             run.get("started_at"), run.get("completed_at"),
+             run.get("valid_until"),
+             _json.dumps(run.get("artifact_references") or []),
+             run.get("status", "running"), run.get("superseded_reason")))
+        await self.db.commit()
+
+    async def list_validation_runs(self, connector_id: str,
+                                   limit: int = 100) -> list:
+        """§13.3: the connector's validation runs — the readiness gate
+        reads PASSING evidence against the CURRENT revision and credential
+        context from these durable rows."""
+        import json as _json
+        rows = await self.db.fetch_all(
+            "SELECT * FROM connector_validation_runs WHERE connector_id=? "
+            "ORDER BY started_at DESC LIMIT ?", (connector_id, limit))
+        out = []
+        for r in rows or []:
+            d = dict(r)
+            d["case_results"] = _json.loads(d.pop("case_results_json", "[]") or "[]")
+            d["artifact_references"] = _json.loads(
+                d.pop("artifact_references_json", "[]") or "[]")
+            out.append(d)
+        return out
+
+    async def save_revision(self, mcp_id: str, revision: dict) -> None:
+        await self.db.execute(
+            "INSERT OR IGNORE INTO mcp_revisions (mcp_id, revision_id, created_at, payload_json) VALUES (?, ?, ?, ?)",
+            (mcp_id, revision["revision_id"], revision["created_at"], json.dumps(revision)),
+        )
+        await self.db.commit()
+
+    async def list_revisions(self, mcp_id: str) -> list:
+        rows = await self.db.fetch_all(
+            "SELECT payload_json FROM mcp_revisions WHERE mcp_id = ? ORDER BY created_at DESC LIMIT 100", (mcp_id,)
+        )
+        return [json.loads(row["payload_json"]) for row in rows]
+
+    async def get_revision(self, mcp_id: str, revision_id: str):
+        row = await self.db.fetch_one(
+            "SELECT payload_json FROM mcp_revisions WHERE mcp_id = ? AND revision_id = ?", (mcp_id, revision_id)
+        )
+        return json.loads(row["payload_json"]) if row else None

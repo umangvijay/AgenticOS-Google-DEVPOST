@@ -8,6 +8,7 @@ Never targets private/loopback/metadata hosts.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import re
@@ -51,22 +52,12 @@ def _is_private_host(host: str) -> bool:
 
 
 def assert_public_https_url(url: str) -> str:
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise HealthCheckError(f"Invalid URL: {url}")
-    host = parsed.hostname
-    if _is_private_host(host):
-        raise HealthCheckError("Refusing to probe private/internal hosts")
+    from backend.mcp.builder.openapi_parser import OpenAPIParser, SSRFViolationError
     try:
-        infos = socket.getaddrinfo(host, None)
-        for info in infos:
-            ip_str = info[4][0]
-            ip = ipaddress.ip_address(ip_str)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                raise HealthCheckError(f"Host {host} resolves to a blocked address")
-    except socket.gaierror as e:
-        raise HealthCheckError(f"DNS lookup failed for {host}: {e}") from e
-    return host
+        OpenAPIParser()._validate_ssrf(url)
+    except SSRFViolationError as exc:
+        raise HealthCheckError(str(exc)) from exc
+    return urlparse(url).hostname
 
 
 def _tls_info(host: str, port: int = 443) -> Dict[str, Any]:
@@ -114,7 +105,7 @@ async def check_website(url: str, timeout: float = 15.0) -> Dict[str, Any]:
     """Probe a public website and return a structured health report."""
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
-    host = assert_public_https_url(url)
+    host = await asyncio.to_thread(assert_public_https_url, url)
 
     started = time.perf_counter()
     status_code: Optional[int] = None
@@ -126,28 +117,48 @@ async def check_website(url: str, timeout: float = 15.0) -> Dict[str, Any]:
     error: Optional[str] = None
 
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, max_redirects=8) as client:
-            resp = await client.get(url, headers={"User-Agent": "AgentOS-HealthCheck/1.0"})
-            status_code = resp.status_code
-            final_url = str(resp.url)
-            headers = {k.lower(): v for k, v in resp.headers.items()}
-            body_bytes = len(resp.content or b"")
-            redirects = [str(r.url) for r in resp.history]
-            if "text/html" in (headers.get("content-type") or ""):
-                match = TITLE_RE.search(resp.text[:80_000] if resp.text else "")
-                if match:
-                    title = re.sub(r"\s+", " ", match.group(1)).strip()[:200]
+        from backend.config.settings import settings as app_settings
+        probe_headers = {
+            "User-Agent": getattr(app_settings, "HEALTH_USER_AGENT", None) or "SandtableHealth/2.0",
+            "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            for hop in range(9):
+                await asyncio.to_thread(assert_public_https_url, final_url)
+                async with client.stream("GET", final_url, headers=probe_headers) as resp:
+                    if resp.is_redirect and resp.headers.get("location"):
+                        if hop == 8:
+                            raise HealthCheckError("Too many redirects")
+                        redirects.append(final_url)
+                        final_url = str(resp.url.join(resp.headers["location"]))
+                        continue
+                    status_code = resp.status_code
+                    headers = {k.lower(): v for k, v in resp.headers.items()}
+                    chunks = []
+                    async for chunk in resp.aiter_bytes():
+                        body_bytes += len(chunk)
+                        if body_bytes > 5 * 1024 * 1024:
+                            raise HealthCheckError("Response exceeds the 5 MB probe limit")
+                        chunks.append(chunk)
+                    if "text/html" in (headers.get("content-type") or ""):
+                        text = b"".join(chunks)[:80000].decode("utf-8", errors="replace")
+                        match = TITLE_RE.search(text)
+                        if match:
+                            title = re.sub(r"\s+", " ", match.group(1)).strip()[:200]
+                    break
     except Exception as e:
         error = str(e).split("\n")[0][:300]
 
     latency_ms = round((time.perf_counter() - started) * 1000, 1)
-    tls = _tls_info(host) if urlparse(url).scheme == "https" or urlparse(final_url).scheme == "https" else {"ok": None}
+    tls = await asyncio.to_thread(_tls_info, host, urlparse(url).port or 443)
     present = [h for h in SECURITY_HEADERS if h in headers]
     missing = [h for h in SECURITY_HEADERS if h not in headers]
     grade = _grade(status_code, latency_ms, tls, missing)
 
     report = {
         "url": url,
+        "data": None,
         "final_url": final_url,
         "host": host,
         "status_code": status_code,

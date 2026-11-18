@@ -1,0 +1,277 @@
+{
+  "catalog_version": 1,
+  "description": "Phase 31 versioned scenario catalog. The catalog owns scenario IDs, versions, fixtures, and the mandatory assertions each scenario must independently observe. Changing a pass condition or assertion set creates a new scenario version and preserves earlier results. Journey bindings preserve the repository J01-J24 numbering; the three scenarios without journey IDs close cross-cutting gaps and carry their own receipts and verdicts.",
+  "source": "docs/qualification/zcode/phase-31.md (November 13, 2026) - versioned journey catalog table",
+  "scenarios": [
+    {
+      "scenario_id": "EXISTING-TOOL",
+      "version": 1,
+      "journey_id": "J01",
+      "mandatory": true,
+      "pass_condition": "Submit through chat. A preconnected operation returns a newly seeded record value, and the answer agrees with a separate source read.",
+      "mandatory_assertions": ["A1-submit-through-chat", "A2-seeded-record-observed", "A3-answer-agrees-with-independent-source-read", "A4-no-acquisition-triggered"],
+      "fixtures": ["controlled_app", "two-disposable-tenants", "nonce-dataset"],
+      "faults": []
+    },
+    {
+      "scenario_id": "SCHEDULE-BUILD-REUSE",
+      "version": 1,
+      "journey_id": "J02",
+      "mandatory": true,
+      "pass_condition": "First due occurrence builds the missing adapter and wakes its original parent. Second occurrence reads changed data with the same eligible revision and creates zero new builds.",
+      "mandatory_assertions": ["A1-first-occurrence-waits", "A2-build-discovered-and-validated", "A3-parent-resumed-with-first-value", "A4-second-occurrence-same-revision", "A5-second-occurrence-fresh-data", "A6-zero-new-builds"],
+      "fixtures": ["controlled_app", "invoice-ledger", "scheduled-occurrence"],
+      "faults": ["worker-death-after-activation", "duplicate-wake", "wake-drop"]
+    },
+    {
+      "scenario_id": "STANDALONE-FORGE",
+      "version": 1,
+      "journey_id": "J03",
+      "mandatory": true,
+      "pass_condition": "A real worker produces and validates standalone bytes. The waiting parent invokes them with a fresh challenge. Independently authored submission is a second required variant.",
+      "mandatory_assertions": ["A1-generated-bytes-protocol-valid", "A2-parent-invokes-with-fresh-challenge", "A3-authored-variant-passes", "A4-failing-required-operation-ineligible"],
+      "fixtures": ["controlled_app", "worker-build"],
+      "faults": ["protocol-startup-cancellation", "build-worker-death"]
+    },
+    {
+      "scenario_id": "ACQUISITION-AUTH",
+      "version": 1,
+      "journey_id": "J04",
+      "mandatory": true,
+      "pass_condition": "Missing credentials preserve the candidate and parent wait. Reconnect with the correct scope resumes once. A credential belonging to the other tenant cannot resume it.",
+      "mandatory_assertions": ["A1-missing-credentials-preserve-candidate", "A2-parent-still-waiting", "A3-reconnect-resumes-once", "A4-foreign-tenant-credential-cannot-resume"],
+      "fixtures": ["controlled_app", "two-disposable-tenants", "credential-store"],
+      "faults": ["credential-rotation-while-waiting"]
+    },
+    {
+      "scenario_id": "SCHEMA-CHANGE",
+      "version": 1,
+      "journey_id": "J05",
+      "mandatory": true,
+      "pass_condition": "An incompatible operation loses eligibility. Replacement validation and activation are observable. Rollback changes which revision the next call executes.",
+      "mandatory_assertions": ["A1-incompatible-operation-loses-eligibility", "A2-replacement-validated-and-activated", "A3-rollback-changes-executed-revision"],
+      "fixtures": ["controlled_app", "connector-revision"],
+      "faults": ["concurrent-updates"]
+    },
+    {
+      "scenario_id": "BROWSER-POSTCONDITION",
+      "version": 1,
+      "journey_id": "J06",
+      "mandatory": true,
+      "pass_condition": "The agent operates on a nonce-bearing controlled page. A separate observer reads the intended final value from the application.",
+      "mandatory_assertions": ["A1-agent-owns-real-session", "A2-nonce-page-operated", "A3-independent-observer-reads-final-value"],
+      "fixtures": ["controlled_app", "browser-owner", "nonce-page"],
+      "faults": ["owner-death"]
+    },
+    {
+      "scenario_id": "TAKEOVER-RETURN",
+      "version": 1,
+      "journey_id": "J07",
+      "mandatory": true,
+      "pass_condition": "Human changes are visible in the same session. A stale agent action has no effect. Handback requires a new observation before dispatch.",
+      "mandatory_assertions": ["A1-human-edit-visible-in-session", "A2-stale-action-refused", "A3-handback-requires-fresh-observation", "A4-fresh-observation-contains-edit"],
+      "fixtures": ["controlled_app", "browser-owner", "two-replicas"],
+      "faults": ["stale-target", "validator-exception"]
+    },
+    {
+      "scenario_id": "DELEGATED-PARTIAL",
+      "version": 1,
+      "journey_id": "J08",
+      "mandatory": true,
+      "pass_condition": "Child success and failure or contradictory results are reflected in the parent's remaining criteria. The independent verifier catches an unsupported conclusion.",
+      "mandatory_assertions": ["A1-child-success-reflected", "A2-child-failure-reflected", "A3-contradiction-detected", "A4-verifier-catches-unsupported-conclusion"],
+      "fixtures": ["controlled_app", "specialist-roles"],
+      "faults": ["late-child-result", "contradictory-siblings"]
+    },
+    {
+      "scenario_id": "WORKER-REPLAY",
+      "version": 1,
+      "journey_id": "J09",
+      "mandatory": true,
+      "pass_condition": "Durable work survives process death, the replacement fences the old claim, and each confirmed effect has one destination record.",
+      "mandatory_assertions": ["A1-work-survives-death", "A2-replacement-fences-old-claim", "A3-stale-worker-cannot-publish", "A4-one-destination-record-per-confirmed-effect"],
+      "fixtures": ["controlled_app", "destination-ledger", "worker-process"],
+      "faults": ["death-before-persist", "death-after-commit-before-ack", "death-during-execution"]
+    },
+    {
+      "scenario_id": "LOST-WRITE-ACK",
+      "version": 1,
+      "journey_id": "J10",
+      "mandatory": true,
+      "pass_condition": "Drop the response after controlled commit. Reconciliation identifies the original committed write. Destination count stays one.",
+      "mandatory_assertions": ["A1-response-dropped-after-commit", "A2-reconciliation-identifies-original-write", "A3-destination-count-one", "A4-settled-once"],
+      "fixtures": ["controlled_app", "destination-ledger"],
+      "faults": ["lost-response-after-commit"]
+    },
+    {
+      "scenario_id": "BOUNDED-REPAIR",
+      "version": 1,
+      "journey_id": "J11",
+      "mandatory": true,
+      "pass_condition": "A transient fault recovers within declared limits and satisfies the original criterion. A persistent fault produces an actionable unresolved outcome.",
+      "mandatory_assertions": ["A1-transient-fault-recovers-in-limits", "A2-original-criterion-verified", "A3-persistent-fault-actionable-unresolved"],
+      "fixtures": ["controlled_app", "recovery-policy"],
+      "faults": ["temporary-outage", "persistent-outage", "expired-credential", "schema-drift", "stale-dom", "missing-artifact"]
+    },
+    {
+      "scenario_id": "POLICY-CANARY",
+      "version": 1,
+      "journey_id": "J12",
+      "mandatory": true,
+      "pass_condition": "An eligible cohort task consumes the approved policy and exhibits a predeclared observable behavior. A control task retains incumbent behavior.",
+      "mandatory_assertions": ["A1-cohort-task-consumes-approved-policy", "A2-predeclared-behavior-observed", "A3-control-retains-incumbent"],
+      "fixtures": ["controlled_app", "policy-store"],
+      "faults": ["declared-breach-stop"]
+    },
+    {
+      "scenario_id": "POLICY-ROLLBACK",
+      "version": 1,
+      "journey_id": "J13",
+      "mandatory": true,
+      "pass_condition": "An ineligible proposal is rejected. A subsequent rollback restores effective behavior for fresh tasks, including after worker restart.",
+      "mandatory_assertions": ["A1-ineligible-proposal-rejected", "A2-rollback-restores-behavior", "A3-behavior-restored-after-worker-restart"],
+      "fixtures": ["controlled_app", "policy-store", "worker-restart"],
+      "faults": []
+    },
+    {
+      "scenario_id": "HELD-OUT-POLICY",
+      "version": 1,
+      "journey_id": "J14",
+      "mandatory": true,
+      "pass_condition": "rl_training produces checkpoint, dataset, split, comparator, per-family outcomes, and governance decision. The linkage can be verified from the attempt.",
+      "mandatory_assertions": ["A1-checkpoint-and-dataset-lineage", "A2-split-and-comparator-recorded", "A3-per-family-outcomes", "A4-governance-decision-recorded"],
+      "fixtures": ["recovery-env", "deterministic-baseline"],
+      "faults": []
+    },
+    {
+      "scenario_id": "MEMORY-INVALIDATION",
+      "version": 1,
+      "journey_id": "J15",
+      "mandatory": true,
+      "pass_condition": "A second replica with a warm cache stops returning corrected or deleted material. Restart and restore preserve the expected visibility.",
+      "mandatory_assertions": ["A1-correction-stops-on-second-replica", "A2-revocation-propagates", "A3-restart-preserves-visibility", "A4-restore-preserves-visibility"],
+      "fixtures": ["memory-store", "two-replicas"],
+      "faults": ["replica-restart"]
+    },
+    {
+      "scenario_id": "RESUME-PDF",
+      "version": 1,
+      "journey_id": "J16",
+      "mandatory": true,
+      "pass_condition": "Draft waits for missing facts. Published PDF preview, Open, and Download resolve to the same authorized revision and SHA-256. Independent page checks pass.",
+      "mandatory_assertions": ["A1-draft-retained-for-missing-fact", "A2-publish-records-revision-and-sha256", "A3-preview-open-download-same-bytes", "A4-independent-page-checks-pass"],
+      "fixtures": ["authorized-facts", "resume-renderer"],
+      "faults": ["missing-renderer", "interrupted-publication", "cross-tenant-access", "revoked-download-authority"]
+    },
+    {
+      "scenario_id": "FEEDBACK-FIX",
+      "version": 1,
+      "journey_id": "J17",
+      "mandatory": true,
+      "pass_condition": "A feedback record links to a reproduced failure, corrective revision, and an independent rerun of the original assertion.",
+      "mandatory_assertions": ["A1-feedback-links-failure", "A2-failure-reproduced-before-fix", "A3-correction-rerun-passes-independently"],
+      "fixtures": ["controlled_app", "feedback-store"],
+      "faults": ["denied-diagnostic-consent"]
+    },
+    {
+      "scenario_id": "TENANT-REVOCATION",
+      "version": 1,
+      "journey_id": "J18",
+      "mandatory": true,
+      "pass_condition": "The other tenant cannot read or act. Revocation during queued work stops the next unauthorized action. Protected output and destination logs agree.",
+      "mandatory_assertions": ["A1-cross-tenant-read-denied", "A2-cross-tenant-action-denied", "A3-revocation-stops-queued-work", "A4-output-and-destination-logs-agree"],
+      "fixtures": ["two-disposable-tenants", "credential-store"],
+      "faults": ["revocation-mid-flight"]
+    },
+    {
+      "scenario_id": "RESTORE-APPLICATION",
+      "version": 1,
+      "journey_id": "J19",
+      "mandatory": true,
+      "pass_condition": "Independent recovered application authenticates the owner, serves historical bytes, honors prior revocation/deletion, and completes fresh verified work.",
+      "mandatory_assertions": ["A1-owner-authenticates-on-restore", "A2-historical-bytes-served", "A3-prior-revocation-honored", "A4-fresh-verified-work-completes"],
+      "fixtures": ["backup-archive", "independent-stack"],
+      "faults": ["missing-key", "partial-restore"]
+    },
+    {
+      "scenario_id": "INSTALL-UPGRADE-ROLLBACK",
+      "version": 1,
+      "journey_id": "J20",
+      "mandatory": true,
+      "pass_condition": "Fresh install, populated upgrade, and rollback yield expected image identities, readable historical data, and working ingress journeys.",
+      "mandatory_assertions": ["A1-fresh-install-image-identities", "A2-upgrade-preserves-historical-data", "A3-rollback-restores-identity-and-journeys"],
+      "fixtures": ["helm-chart", "populated-database"],
+      "faults": ["tag-only-release-rejected"]
+    },
+    {
+      "scenario_id": "PROVIDER-STREAM",
+      "version": 1,
+      "journey_id": "J21",
+      "mandatory": true,
+      "pass_condition": "Real provider request IDs, partial/final usage, cancellation, and failover reconcile with attempts, accounting, and displayed output per provider.",
+      "mandatory_assertions": ["A1-real-provider-request-ids", "A2-partial-and-final-usage-reconciled", "A3-cancellation-settles-once", "A4-failover-attempts-accounted"],
+      "fixtures": ["provider-adapters", "metering-ledger"],
+      "faults": ["disconnect-after-partial", "late-duplicate-receipt"]
+    },
+    {
+      "scenario_id": "WORKSPACE-RECONNECT",
+      "version": 1,
+      "journey_id": "J22",
+      "mandatory": true,
+      "pass_condition": "A lost stream, late response, navigation, and account switch converge on the correct account and run, with one command and one final answer.",
+      "mandatory_assertions": ["A1-lost-stream-reconnects", "A2-late-response-converges", "A3-account-switch-clears-protected-state", "A4-one-command-one-final-answer"],
+      "fixtures": ["real-backend", "playwright-browser"],
+      "faults": ["navigation-away", "stale-response"]
+    },
+    {
+      "scenario_id": "DECLARED-APP-INSTALL",
+      "version": 1,
+      "journey_id": "J23",
+      "mandatory": true,
+      "pass_condition": "Install a declared app, bind a scoped credential, execute a validated operation, and demonstrate that an unvalidated operation stays unavailable.",
+      "mandatory_assertions": ["A1-declared-app-installed", "A2-scoped-credential-bound", "A3-validated-operation-executes", "A4-unvalidated-operation-unavailable"],
+      "fixtures": ["declared-app", "scoped-credential"],
+      "faults": []
+    },
+    {
+      "scenario_id": "MODEL-EDIT-EXPORT",
+      "version": 1,
+      "journey_id": "J24",
+      "mandatory": true,
+      "pass_condition": "Independent parsing of two exported OBJ revisions measures the requested dimensional change. Preview, export, units, and lineage agree.",
+      "mandatory_assertions": ["A1-two-revisions-exported", "A2-independent-reader-measures-change", "A3-units-and-lineage-agree", "A4-preview-rotation-leaves-bytes-unchanged"],
+      "fixtures": ["modeling-pipeline", "independent-reader"],
+      "faults": ["cancel-queued", "cancel-executing", "corrupt-export"]
+    },
+    {
+      "scenario_id": "ORDINARY-CHAT",
+      "version": 1,
+      "journey_id": null,
+      "mandatory": true,
+      "pass_condition": "An ordinary answer with no tool acquisition: one command, one final answer containing the user-provided fact, no unintended action, streaming interrupt and reconnect converge.",
+      "mandatory_assertions": ["A1-one-command", "A2-one-final-answer", "A3-answer-carries-user-fact", "A4-no-acquisition-or-unintended-action", "A5-interrupt-reconnect-converges"],
+      "fixtures": ["real-backend", "fresh-user-fact"],
+      "faults": ["stream-interrupt"]
+    },
+    {
+      "scenario_id": "LINK-PREVIEW",
+      "version": 1,
+      "journey_id": null,
+      "mandatory": true,
+      "pass_condition": "Both URL renderers produce a hover card keyed to the current destination: raw user URL and assistant Markdown link, distinct titles and thumbnails, slow-A/fast-B race keeps B visible, Open stays inside all four viewport edges, pointer transfer keeps it open, keyboard focus enters and Escape returns focus, touch has an explicit accessible trigger; denied redirects, blocked framing, and slow loads get explicit states.",
+      "mandatory_assertions": ["A1-raw-url-triggers-card", "A2-markdown-link-triggers-card", "A3-distinct-title-and-thumbnail", "A4-slow-A-fast-B-shows-B", "A5-open-inside-all-four-edges", "A6-pointer-transfer-keeps-open", "A7-keyboard-focus-and-escape", "A8-touch-explicit-trigger", "A9-denied-redirect-explicit-state", "A10-blocked-framing-offers-open", "A11-slow-load-loading-state"],
+      "fixtures": ["controlled-pages", "playwright-browser", "real-backend"],
+      "faults": ["slow-metadata-a", "refused-destination", "disallowed-redirect", "blocked-framing"]
+    },
+    {
+      "scenario_id": "DOCK-RESOURCE-IDENTITY",
+      "version": 1,
+      "journey_id": null,
+      "mandatory": true,
+      "pass_condition": "A live browser, PDF, and 3D resource move between docked and floating workspace presentations while session ID, selected resource, chat draft, and current authority are preserved; account switch clears protected tabs; stale responses after navigation are ignored; cross-replica reconnect rehydrates from authorized server state.",
+      "mandatory_assertions": ["A1-browser-session-id-preserved", "A2-selected-resource-preserved", "A3-chat-draft-preserved", "A4-authority-preserved", "A5-account-switch-clears-protected-tabs", "A6-stale-response-ignored", "A7-reconnect-rehydrates"],
+      "fixtures": ["real-backend", "playwright-browser", "three-resource-tabs"],
+      "faults": ["navigation-away", "replica-switch"]
+    }
+  ]
+}

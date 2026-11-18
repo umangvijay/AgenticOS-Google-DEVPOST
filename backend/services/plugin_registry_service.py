@@ -26,6 +26,16 @@ class PluginValidator:
         if not self.policy.is_allowed(manifest.requested_permissions):
             raise ValueError("Manifest requests unsupported or forbidden permissions.")
             
+        if not manifest.agents:
+            raise ValueError("Plugin must define at least one agent")
+        agent_ids = [agent.agent_id for agent in manifest.agents]
+        if len(agent_ids) != len(set(agent_ids)):
+            raise ValueError("Plugin agent IDs must be unique")
+        declared = set(manifest.required_tools)
+        for agent in manifest.agents:
+            if not agent.allowed_tools or not set(agent.allowed_tools).issubset(declared):
+                raise ValueError(f"Agent {agent.agent_id} may only use tools declared by its plugin")
+
         # 4. Verify no arbitrary tools are created (tools must only be referenced)
         # We assume the schema already strictly enforces this (no `endpoint` or `code` fields in required_tools).
         
@@ -38,9 +48,11 @@ class PluginRegistryService:
         self.policy = PluginPolicy()
         self.validator = PluginValidator(self.policy)
 
-    def install_plugin(self, manifest_json: str, user_id: str) -> PluginRecord:
+    async def install_plugin(self, manifest_json: str, user_id: str) -> PluginRecord:
         # 1. Parse to DISCOVERED
         manifest = PluginManifest.model_validate_json(manifest_json)
+        if manifest.scope.value != "USER":
+            raise ValueError("Only user-scoped plugins may be installed by this API")
         
         record = PluginRecord(
             id=str(uuid.uuid4()),
@@ -48,17 +60,17 @@ class PluginRegistryService:
             state=PluginLifecycleState.INSTALLING,
             installed_by=user_id
         )
-        self.repository.save(record)
+        await self.repository.save(record)
         
         # 2. VALIDATING
         record.state = PluginLifecycleState.VALIDATING
-        self.repository.save(record)
+        await self.repository.save(record)
         
         try:
             self.validator.validate_manifest(manifest, manifest_json)
             # 3. INSTALLED
             record.state = PluginLifecycleState.INSTALLED
-            self.repository.save(record)
+            await self.repository.save(record)
             
             audit_repo.log_event(AuditEvent(
                 event_type="PLUGIN_INSTALLED",
@@ -69,22 +81,24 @@ class PluginRegistryService:
             ))
         except Exception as e:
             record.state = PluginLifecycleState.FAILED
-            self.repository.save(record)
+            await self.repository.save(record)
             raise ValueError(f"Plugin validation failed: {str(e)}")
             
         return record
 
-    def enable_plugin(self, record_id: str, user_id: str) -> None:
-        record = self.repository.get_by_id(record_id)
+    async def enable_plugin(self, record_id: str, user_id: str) -> None:
+        record = await self.repository.get_by_id(record_id)
         if not record:
             raise ValueError("Plugin not found")
+        if record.manifest.scope.value == "USER" and record.installed_by != user_id:
+            raise ValueError("User-scoped plugins can only be enabled by their owner")
             
         # Only allow enabling if INSTALLED or DISABLED
         if record.state not in [PluginLifecycleState.INSTALLED, PluginLifecycleState.DISABLED]:
             raise ValueError(f"Cannot enable plugin from state: {record.state}")
             
         record.state = PluginLifecycleState.ENABLED
-        self.repository.save(record)
+        await self.repository.save(record)
         
         audit_repo.log_event(AuditEvent(
             event_type="PLUGIN_ENABLED",
@@ -95,18 +109,20 @@ class PluginRegistryService:
         ))
         
         # Build new runtime snapshot atomically
-        self._rebuild_snapshot()
+        await self._rebuild_snapshot()
 
-    def disable_plugin(self, record_id: str, user_id: str) -> None:
-        record = self.repository.get_by_id(record_id)
+    async def disable_plugin(self, record_id: str, user_id: str) -> None:
+        record = await self.repository.get_by_id(record_id)
         if not record:
             raise ValueError("Plugin not found")
+        if record.manifest.scope.value == "USER" and record.installed_by != user_id:
+            raise ValueError("User-scoped plugins can only be disabled by their owner")
             
         record.state = PluginLifecycleState.DISABLING
-        self.repository.save(record)
+        await self.repository.save(record)
         
         record.state = PluginLifecycleState.DISABLED
-        self.repository.save(record)
+        await self.repository.save(record)
         
         audit_repo.log_event(AuditEvent(
             event_type="PLUGIN_DISABLED",
@@ -117,10 +133,14 @@ class PluginRegistryService:
         ))
         
         # Build new runtime snapshot atomically
-        self._rebuild_snapshot()
+        await self._rebuild_snapshot()
         
-    def _rebuild_snapshot(self):
+    async def _rebuild_snapshot(self):
         # Fetch all currently enabled plugins to build the next snapshot version
-        all_plugins = self.repository.list_all()
+        all_plugins = await self.repository.list_all()
         enabled = [p for p in all_plugins if p.state == PluginLifecycleState.ENABLED]
         self.snapshot_registry.build_snapshot(enabled)
+
+
+    async def refresh_snapshot(self):
+        await self._rebuild_snapshot()

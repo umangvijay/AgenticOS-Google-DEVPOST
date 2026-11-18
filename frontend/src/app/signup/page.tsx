@@ -1,5 +1,7 @@
 "use client";
 
+import AuthFrame from "@/components/AuthFrame";
+import PasswordInput from "@/components/PasswordInput";
 import { useState, FormEvent, useEffect } from "react";
 import { useAuth } from "@/lib/auth-context";
 import Link from "next/link";
@@ -60,7 +62,7 @@ function SignupContent() {
   const isGuest = user?.role === "guest";
 
   useEffect(() => {
-    document.title = "Sign up · AgentOS";
+    document.title = "Sign up · Sandtable";
   }, []);
 
   useEffect(() => {
@@ -87,41 +89,30 @@ function SignupContent() {
   }
 
   return (
-    <div className="mesh-gradient" style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div className="animate-fade-in-up" style={{ width: "100%", maxWidth: 440, padding: "0 20px" }}>
-        <Link href="/" className="btn btn-ghost" style={{ marginBottom: 16 }}>← Back to home</Link>
-        <div style={{ textAlign: "center", marginBottom: 40 }}>
-          <div style={{ fontSize: 36, fontWeight: 800, marginBottom: 8 }}>
-            <span className="gradient-text">AgentOS</span>
-          </div>
-          <p style={{ color: "var(--text-secondary)", fontSize: 15 }}>
-            Create your autonomous workspace
-          </p>
-        </div>
-
-        <div className="glass-card glass-lift" style={{ padding: 32 }}>
-          <form onSubmit={handleSubmit}>
+    <AuthFrame title="Start with a blank sheet." description="Create an account to start planning and building.">
+        <div className="auth-form-card">
+          <form onSubmit={handleSubmit} aria-busy={loading}>
             {error && (
-              <div style={{ padding: "10px 14px", marginBottom: 16, background: "var(--error-subtle)", borderRadius: "var(--radius-md)", color: "var(--error)", fontSize: 13 }}>
+              <div role="alert" style={{ padding: "10px 14px", marginBottom: 16, background: "var(--error-subtle)", borderRadius: "var(--radius-md)", color: "var(--error)", fontSize: 13 }}>
                 {error}{" "}
                 {error.includes("Sign in") && <Link href="/login" style={{ color: "var(--accent)", fontWeight: 600 }}>Sign in</Link>}
               </div>
             )}
             <div style={{ marginBottom: 16 }}>
-              <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 6 }}>Full Name</label>
-              <input type="text" className="input" placeholder="Ada Lovelace" value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
+              <label htmlFor="signup-name" style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 6 }}>Full Name</label>
+              <input id="signup-name" name="name" autoComplete="name" disabled={loading} type="text" className="input" placeholder="Ada Lovelace" value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
             </div>
             <div style={{ marginBottom: 16 }}>
-              <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 6 }}>Email</label>
-              <input type="email" className="input" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} required />
+              <label htmlFor="signup-email" style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 6 }}>Email</label>
+              <input id="signup-email" name="email" autoComplete="email" disabled={loading} type="email" className="input" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} required />
             </div>
             <div style={{ marginBottom: 24 }}>
-              <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 6 }}>Password</label>
-              <input type="password" className="input" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
-              <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 8 }}>Must be at least 8 characters, with uppercase, lowercase, number, and special character.</div>
+              <label htmlFor="signup-password" style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 6 }}>Password</label>
+              <PasswordInput id="signup-password" name="password" disabled={loading} className="input" aria-describedby="password-requirements" placeholder="Create a password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
+              <div id="password-requirements" style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 8 }}>Must be at least 8 characters, with uppercase, lowercase, number, and special character.</div>
             </div>
             <button type="submit" className="btn btn-primary btn-lg" style={{ width: "100%", marginBottom: 16 }} disabled={loading}>
-              {loading ? <span className="spinner" /> : "Create Account"}
+              {loading ? <><span className="spinner" aria-hidden="true" /> Creating account…</> : "Create Account"}
             </button>
           </form>
 
@@ -149,8 +140,7 @@ function SignupContent() {
         <p style={{ textAlign: "center", marginTop: 24, fontSize: 14, color: "var(--text-secondary)" }}>
           Already have an account? <Link href="/login" style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 500 }}>Sign in</Link>
         </p>
-      </div>
-    </div>
+    </AuthFrame>
   );
 }
 

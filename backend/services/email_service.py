@@ -21,7 +21,7 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 from email.utils import formataddr
-from typing import Any, Dict, List, Optional
+from typing import Optional, Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -98,14 +98,89 @@ async def send_email(
 
     from_email = smtp_cfg.get("from_email") or smtp_cfg["username"]
 
-    await asyncio.to_thread(
-        _send_sync, smtp_cfg, recipients, subject, body, html, from_email, from_name
-    )
-    logger.info("Email sent to %d recipient(s) for user %s", len(recipients), user_id)
+    # Phase 5 §5.8: sending goes through the EFFECT boundary — per-recipient
+    # acceptance/refusal preserved, a stable Message-ID correlates the send,
+    # and a lost connection yields OUTCOME_UNKNOWN (never an automatic
+    # resend, and never a blanket "sent": true).
+    from backend.repositories.effect_repository import get_effect_repo
+    from backend.services.effect_service import send_email_effect
+    effect_repo = get_effect_repo()
+    if effect_repo is None:
+        raise EmailError("Effect ledger unavailable; refusing to send without "
+                         "a durable record of the intended external action")
 
+    result = await send_email_effect(
+        secrets_repo=secrets_repo, effect_repo=effect_repo, user_id=user_id,
+        to=recipients, subject=subject, body=body, html=html,
+        from_name=from_name, run_id=_current_run_id(), task_id=_current_task_id(),
+        command_id=_current_command_id(),
+    )
+
+    if result.outcome.value == "outcome_unknown":
+        logger.warning("Email outcome UNKNOWN for user %s (effect %s) — no "
+                       "automatic resend (§5.16)", user_id, result.effect_id)
+        return {
+            "sent": False,
+            "outcome": "unknown",
+            "effect_id": result.effect_id,
+            "to": recipients,
+            "subject": subject,
+            "message": result.safe_user_message,
+        }
+    if result.outcome.value == "partially_applied":
+        receipt = result.receipt or {}
+        detail = getattr(receipt, "detail", {}) or {}
+        return {
+            "sent": True,
+            "outcome": "partial",
+            "effect_id": result.effect_id,
+            "to": detail.get("accepted", recipients),
+            "refused": detail.get("refused", []),
+            "subject": subject,
+            "from": from_email,
+            "message": result.safe_user_message,
+        }
+    if result.outcome.value == "confirmed_not_applied":
+        detail = getattr(result.receipt, "detail", {}) or {}
+        return {
+            "sent": False,
+            "outcome": "refused",
+            "effect_id": result.effect_id,
+            "refused": detail.get("refused", recipients),
+            "subject": subject,
+            "from": from_email,
+            "message": result.safe_user_message,
+        }
+    logger.info("Email accepted for %d recipient(s) for user %s (effect %s)",
+                len(recipients), user_id, result.effect_id)
     return {
         "sent": True,
+        "outcome": "accepted",
+        "effect_id": result.effect_id,
         "to": recipients,
         "subject": subject,
         "from": from_email,
+        "message": result.safe_user_message,
     }
+
+
+def _current_run_id() -> Optional[str]:
+    try:
+        from backend.services.llm_context import get_run_id
+        return get_run_id()
+    except Exception:
+        return None
+
+
+def _current_task_id() -> Optional[str]:
+    try:
+        from backend.services.llm_context import get_task_id
+        return get_task_id()
+    except Exception:
+        return None
+
+
+def _current_command_id() -> Optional[str]:
+    """C4 bridge: the command linked to the current run (best-effort; the
+    effect keeps run_id regardless, and the command is reachable by run)."""
+    return None

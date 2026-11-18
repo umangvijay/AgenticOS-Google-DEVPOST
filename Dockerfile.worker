@@ -1,5 +1,7 @@
-# Same image as the API: the workflow engine runs in-process in FastAPI.
-# Cloud Build still tags a worker image for the optional Pub/Sub service.
+# Worker service — runs ONLY the background worker, NOT the API.
+# This is a long-running pull consumer. On Google Cloud deploy it as a Cloud
+# Run Worker Pool, not a Cloud Run Service (it has no HTTP listener).
+# The API sets RUN_WORKER=0 and does NOT start the worker in-process.
 FROM python:3.11-slim as builder
 
 WORKDIR /app
@@ -8,20 +10,42 @@ RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.t
 
 FROM python:3.11-slim
 
+# Cloud Build passes its built-in COMMIT_SHA; local builds default to unknown.
+ARG COMMIT_SHA=unknown
+ENV COMMIT_SHA=${COMMIT_SHA}
+
 WORKDIR /app
 
 COPY --from=builder /app/wheels /wheels
 COPY --from=builder /app/requirements.txt .
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN pip install --no-cache /wheels/* \
     && python -m playwright install --with-deps chromium
 
-COPY . .
+COPY backend ./backend
+COPY main.py ./main.py
 
 ENV PYTHONPATH=/app
-ENV PORT=8080
 ENV APP_ENV=production
-ENV STORAGE_BACKEND=sqlite
+# STORAGE_BACKEND is supplied at deploy time. Cloud workers must share the
+# API's Firestore database; baking SQLite here creates an isolated data store.
+# Worker-only mode — the API does NOT start a worker when this is running
+ENV WORKER_ONLY=1
 
-EXPOSE 8080
+# Start ONLY the worker process, not the API server.
+# Run the API/worker and browser as an unprivileged identity.
+# The repo tree may carry restrictive modes (700/600); the unprivileged
+# runtime user must be able to read every copied file.
+RUN groupadd --gid 10001 agentos && useradd --uid 10001 --gid 10001 --create-home agentos \
+    && mkdir -p /app/data \
+    && chown -R agentos:agentos /app/data \
+    && chmod -R a+rX /ms-playwright
+# Copy preserves source modes — normalize so uid 10001 can read everything.
+RUN chmod -R a+rX /app
+# Dev-mode containers auto-generate JWT keypairs here; production
+# injects them from Secret Manager instead.
+RUN mkdir -p /app/backend/security/keys && chown 10001:10001 /app/backend/security/keys /app/data
 
-CMD ["sh", "-c", "uvicorn backend.api.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+USER 10001:10001
+
+CMD ["python", "-m", "backend.worker"]

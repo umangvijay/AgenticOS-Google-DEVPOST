@@ -1,0 +1,19 @@
+/* Page transition: every navigation fades up into place */
+.route-transition {
+  animation: route-enter .55s cubic-bezier(.16, 1, .3, 1) both;
+}
+
+@keyframes route-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-transition { animation: none; }
+}

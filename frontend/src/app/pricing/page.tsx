@@ -1,6 +1,7 @@
 import Link from "next/link";
 import React from "react";
 import PublicNavbar from "@/components/PublicNavbar";
+import SheetHeader from "@/components/SheetHeader";
 import dynamic from "next/dynamic";
 
 export const metadata = { title: "Pricing" };
@@ -14,20 +15,17 @@ export default function PricingPage() {
 
       <main className="py-12 px-4 md:py-20 md:px-8">
         <div className="max-w-6xl mx-auto pb-10 md:pb-20">
-          <div className="text-center mb-16 md:mb-20 mt-6 md:mt-10">
+          <SheetHeader
+            eyebrow="RATE CARD"
+            index="03"
+            title={<>Simple, <em>transparent</em> pricing.</>}
+            deck="Start for free, upgrade when you need more power."
+          />
 
-            <h1 className="animate-fade-in-up text-4xl md:text-5xl lg:text-6xl font-black mb-6 text-[var(--text-primary)]">
-              Simple, transparent pricing.
-            </h1>
-            <p className="animate-fade-in-up text-lg md:text-xl text-[var(--text-secondary)]" style={{ animationDelay: "0.1s" }}>
-              Start for free, upgrade when you need more power.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8 md:gap-8 items-stretch">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-8 md:gap-8 items-stretch mt-14 md:mt-20">
             
             {/* Starter Plan */}
-            <TiltCard className="glass-card pricing-card animate-fade-in-up p-6 md:p-10 flex flex-col" style={{ animationDelay: "0.2s" }}>
+            <TiltCard className="glass-card pricing-card p-6 md:p-10 flex flex-col" data-scroll-reveal style={{ "--reveal-delay": "0ms" } as React.CSSProperties}>
               <h2 className="text-xl md:text-2xl font-extrabold mb-2">Starter</h2>
               <p className="text-[var(--text-secondary)] mb-6">Perfect for individuals exploring automation.</p>
               <div className="text-4xl md:text-5xl font-extrabold mb-6">₹299<span className="text-base text-[var(--text-tertiary)] font-normal">/mo</span></div>
@@ -40,8 +38,8 @@ export default function PricingPage() {
             </TiltCard>
 
             {/* Pro Plan */}
-            <TiltCard className="glass-card pricing-card animate-fade-in-up p-6 md:p-10 flex flex-col relative border-2 border-[var(--accent)]" style={{ animationDelay: "0.3s", boxShadow: "0 20px 40px rgba(216, 133, 143, 0.15)", overflow: "visible" }}>
-              <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 bg-[var(--accent)] text-[#5c1621] px-4 py-1 rounded-full text-xs font-extrabold tracking-widest whitespace-nowrap">
+            <TiltCard className="glass-card pricing-card p-6 md:p-10 flex flex-col relative border-2 border-[var(--accent)]" data-scroll-reveal style={{ "--reveal-delay": "110ms", boxShadow: "0 20px 40px rgba(46, 86, 196, 0.15)", overflow: "visible" } as React.CSSProperties}>
+              <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 bg-[var(--accent)] text-white px-4 py-1 rounded-full text-xs font-extrabold tracking-widest whitespace-nowrap">
                 MOST POPULAR
               </div>
               <h2 className="text-xl md:text-2xl font-extrabold mb-2">Professional</h2>
@@ -57,7 +55,7 @@ export default function PricingPage() {
             </TiltCard>
 
             {/* Enterprise Plan */}
-            <TiltCard className="glass-card pricing-card animate-fade-in-up p-6 md:p-10 flex flex-col" style={{ animationDelay: "0.4s" }}>
+            <TiltCard className="glass-card pricing-card p-6 md:p-10 flex flex-col" data-scroll-reveal style={{ "--reveal-delay": "220ms" } as React.CSSProperties}>
               <h2 className="text-xl md:text-2xl font-extrabold mb-2">Enterprise</h2>
               <p className="text-[var(--text-secondary)] mb-6">Custom solutions for large organizations.</p>
               <div className="text-4xl md:text-5xl font-extrabold mb-6">₹1199<span className="text-base text-[var(--text-tertiary)] font-normal">/mo</span></div>
@@ -70,6 +68,16 @@ export default function PricingPage() {
               <Link href="/contact" className="btn btn-secondary w-full mt-auto text-center">Contact Sales</Link>
             </TiltCard>
 
+          </div>
+
+          <div className="mt-14 md:mt-20 max-w-3xl mx-auto" data-scroll-reveal>
+            <div className="glass-card p-6 md:p-8 text-center">
+              <p className="text-xs font-extrabold tracking-[0.14em] text-[var(--accent)] mb-3">EVERY PLAN INCLUDES</p>
+              <p className="text-sm md:text-base text-[var(--text-secondary)] leading-relaxed">
+                RS-256 secured accounts · server-side session revocation · HMAC-signed webhooks ·
+                daily token budget guardrails · audit-logged agent actions · EU or US data residency.
+              </p>
+            </div>
           </div>
         </div>
       </main>

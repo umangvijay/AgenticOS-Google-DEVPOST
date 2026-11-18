@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class Role(str, Enum):
+    SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
     USER = "user"
     VIEWER = "viewer"
@@ -81,7 +82,9 @@ def check_permission(role: str, resource_type: str, action: str) -> bool:
     if role_enum == Role.GUEST:
         role_enum = Role.USER
 
-    # Check admin wildcard first
+    # Super admin: unrestricted. Check admin wildcard next.
+    if role_enum == Role.SUPER_ADMIN:
+        return True
     if PERMISSIONS.get((Role.ADMIN, "*", "*")) and role_enum == Role.ADMIN:
         return True
 

@@ -1,28 +1,69 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { getSettings, updateSettings, UserSettings, storeCredential, pingGemini } from "@/lib/api";
+import { getSettings, updateSettings, UserSettings, storeCredential, validateCredential, pingGemini, listAdminUsers, setUserActive, adminStats } from "@/lib/api";
+import ApiKeyManager from "@/components/ApiKeyManager";
+import TokenStatusCard from "@/components/TokenStatusCard";
+import { applyTheme, type ThemePref } from "@/lib/theme";
 import { useAuth } from "@/lib/auth-context";
 
 export default function SettingsPage() {
   const { user, updateProfile } = useAuth();
   const [settings, setSettings] = useState<UserSettings | null>(null);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState({ text: "", type: "" });
 
   const [name, setName] = useState(user?.name || "");
-  const [geminiKey, setGeminiKey] = useState("");
-  const [savingKey, setSavingKey] = useState(false);
-  const [grokKey, setGrokKey] = useState("");
-  const [savingGrok, setSavingGrok] = useState(false);
   const [testingKey, setTestingKey] = useState(false);
   const [keyMessage, setKeyMessage] = useState({ text: "", type: "" });
+  const [keyProvider, setKeyProvider] = useState("gemini");
+  const [unifiedKey, setUnifiedKey] = useState("");
+  const [savingUnified, setSavingUnified] = useState(false);
+  const [unifiedMsg, setUnifiedMsg] = useState({ text: "", type: "" });
+
+  const PROVIDERS = [
+    { id: "gemini", label: "Google Gemini", placeholder: "AIza… or AQ.…" },
+    { id: "claude", label: "Anthropic Claude", placeholder: "sk-ant-…" },
+    { id: "grok", label: "xAI Grok", placeholder: "xai-…" },
+    { id: "zai", label: "Z.ai GLM", placeholder: "zai-… or key id" },
+    { id: "openai", label: "OpenAI", placeholder: "sk-…" },
+  ];
+
+  const saveUnifiedKey = async () => {
+    const key = unifiedKey.trim();
+    if (!key) return;
+    setSavingUnified(true);
+    setUnifiedMsg({ text: "", type: "" });
+    try {
+      const validation = await validateCredential(keyProvider, { api_key: key });
+      if (!validation.valid) {
+        setUnifiedMsg({ text: validation.error || "That key was rejected by the provider.", type: "error" });
+        return;
+      }
+      await storeCredential(keyProvider, { api_key: key });
+      setUnifiedKey("");
+      const label = PROVIDERS.find(p => p.id === keyProvider)?.label || keyProvider;
+      setUnifiedMsg({
+        text: `${label} key validated live and stored in the encrypted Vault.`
+          + (keyProvider === "gemini" ? " The agent will use it for planning, MCP builds, and generation."
+            : keyProvider === "grok" ? " It is used automatically when Gemini hits quota."
+            : " Stored for integrations and tools that use this provider."),
+        type: "success",
+      });
+    } catch (err) {
+      setUnifiedMsg({ text: err instanceof Error ? err.message : "Could not save key", type: "error" });
+    } finally {
+      setSavingUnified(false);
+    }
+  };
 
   useEffect(() => {
     async function load() {
       try {
-        const { settings: s } = await getSettings();
+        const { settings: s, available_models } = await getSettings();
+        setAvailableModels(available_models || []);
         setSettings(s);
       } catch (err) {
         console.error(err);
@@ -46,12 +87,8 @@ export default function SettingsPage() {
         await updateProfile({ name });
       }
 
-      // Apply theme
-      if (settings.theme === "light") {
-        document.documentElement.setAttribute("data-theme", "light");
-      } else {
-        document.documentElement.removeAttribute("data-theme");
-      }
+      // Apply theme immediately and persist for first-paint
+      applyTheme((settings.theme as ThemePref) || "system");
 
       setMessage({ text: "Settings saved successfully", type: "success" });
     } catch (err: unknown) {
@@ -61,55 +98,43 @@ export default function SettingsPage() {
     }
   };
 
-  const saveGeminiKey = async () => {
-    if (!geminiKey.trim()) return;
-    setSavingKey(true);
-    setKeyMessage({ text: "", type: "" });
-    try {
-      await storeCredential("gemini", { api_key: geminiKey.trim() });
-      setGeminiKey("");
-      setKeyMessage({ text: "Gemini key stored in the vault. New runs will use it.", type: "success" });
-    } catch (err: unknown) {
-      setKeyMessage({ text: err instanceof Error ? err.message : "Could not save key", type: "error" });
-    } finally {
-      setSavingKey(false);
-    }
-  };
-
-  const saveGrokKey = async () => {
-    if (!grokKey.trim()) return;
-    setSavingGrok(true);
-    setKeyMessage({ text: "", type: "" });
-    try {
-      await storeCredential("grok", { api_key: grokKey.trim() });
-      setGrokKey("");
-      setKeyMessage({ text: "Grok key stored. It is used when Gemini is unavailable.", type: "success" });
-    } catch (err: unknown) {
-      setKeyMessage({ text: err instanceof Error ? err.message : "Could not save Grok key", type: "error" });
-    } finally {
-      setSavingGrok(false);
-    }
-  };
-
   const testGemini = async () => {
     setTestingKey(true);
     setKeyMessage({ text: "", type: "" });
     try {
-      const res = await pingGemini();
+      // If a key is pasted in the field, test THAT key, not the vault key
+      const candidateKey = keyProvider === "gemini" ? unifiedKey.trim() || undefined : undefined;
+      const res = await pingGemini(candidateKey);
       setKeyMessage({
         text: res.ok
-          ? `Gemini is working${res.using_user_key ? " with your vault key" : " with the server key"}.`
+          ? `Gemini is working${res.using_user_key ? (candidateKey ? " with the pasted key" : " with your vault key") : " with the server key"}.`
           : `Gemini replied: ${res.reply || "unexpected response"}`,
         type: res.ok ? "success" : "error",
       });
     } catch (err: unknown) {
       setKeyMessage({
-        text: err instanceof Error ? err.message : "Gemini test failed. Save your key in Settings and try again.",
+        text: err instanceof Error ? err.message : "Gemini test failed. Check the key and try again.",
         type: "error",
       });
     } finally {
       setTestingKey(false);
     }
+  };
+
+  const [adminUsers, setAdminUsers] = useState<Awaited<ReturnType<typeof listAdminUsers>> | null>(null);
+  const [adminStatsData, setAdminStatsData] = useState<Awaited<ReturnType<typeof adminStats>> | null>(null);
+
+  useEffect(() => {
+    if (user?.role !== "admin") return;
+    (async () => {
+      try { setAdminUsers(await listAdminUsers()); } catch { /* not admin */ }
+      try { setAdminStatsData(await adminStats()); } catch { /* ignore */ }
+    })();
+  }, [user?.role]);
+
+  const toggleUser = async (userId: string, active: boolean) => {
+    await setUserActive(userId, active);
+    try { setAdminUsers(await listAdminUsers()); } catch { /* ignore */ }
   };
 
   if (loading) return (
@@ -119,10 +144,16 @@ export default function SettingsPage() {
   );
 
   return (
-    <div className="animate-fade-in" style={{ maxWidth: 800, margin: "0 auto" }}>
+    <div className="animate-fade-in" data-scroll-reveal style={{ maxWidth: 800, margin: "0 auto" }}>
       <div style={{ marginBottom: 32 }}>
         <h1 style={{ fontSize: 24, fontWeight: 700 }}>Settings</h1>
-        <p style={{ color: "var(--text-secondary)" }}>Manage your account and AgentOS preferences.</p>
+        <p style={{ color: "var(--text-secondary)" }}>Manage your account and Sandtable preferences.</p>
+      <div style={{ marginTop: 14 }}>
+        <span className="trust-badge">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z" /></svg>
+          Protected by industry-standard AES-256 and end-to-end client-side encryption
+        </span>
+      </div>
       </div>
 
       <form onSubmit={handleSaveSettings}>
@@ -166,6 +197,25 @@ export default function SettingsPage() {
         </div>
 
         <div className="glass-card" style={{ padding: 24, marginBottom: 24 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 8, borderBottom: "1px solid var(--border-primary)", paddingBottom: 12 }}>
+            Run Webhooks (outbound)
+          </h2>
+          <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 12, lineHeight: 1.5 }}>
+            We POST a signed summary (HMAC-SHA256) to this HTTPS URL every time one of your runs
+            finishes (COMPLETED or FAILED). Must be a public HTTPS endpoint. Leave empty to disable.
+            Optionally store a Vault secret named <code>webhook_out</code> to override the default signing key.
+          </p>
+          <input
+            type="url"
+            className="input"
+            placeholder="https://your-service.example.com/hooks/veyrune"
+            value={settings?.webhook_url || ""}
+            onChange={e => setSettings(s => s ? { ...s, webhook_url: e.target.value } : s)}
+            style={{ maxWidth: 480 }}
+          />
+        </div>
+
+        <div className="glass-card" style={{ padding: 24, marginBottom: 24 }}>
           <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 20, borderBottom: "1px solid var(--border-primary)", paddingBottom: 12 }}>
             Agent Autonomy
           </h2>
@@ -201,52 +251,36 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        <TokenStatusCard />
+
         <div className="glass-card" style={{ padding: 24, marginBottom: 24 }}>
           <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 20, borderBottom: "1px solid var(--border-primary)", paddingBottom: 12 }}>
-            Your Gemini API key
+            Model API key
           </h2>
           <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 16 }}>
-            Bring your own key from Google AI Studio. It is stored encrypted in Vault as <code>gemini</code> and used for planning, MCP builds, and generation instead of the shared quota.
+            One place for any provider. Keys are validated live against the provider before being stored encrypted (AES-256-GCM) in your Vault — invalid keys are rejected. Gemini powers the agent; Grok is the automatic fallback; other providers are stored for their integrations.
           </p>
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+            <select className="input" value={keyProvider} onChange={e => { setKeyProvider(e.target.value); setUnifiedMsg({ text: "", type: "" }); }} style={{ maxWidth: 220 }}>
+              {PROVIDERS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
             <input
               type="password"
               className="input"
-              placeholder="AIza… or AQ.…"
-              value={geminiKey}
-              onChange={(e) => setGeminiKey(e.target.value)}
-              style={{ flex: 1, minWidth: 240, fontSize: 16 }}
+              placeholder={PROVIDERS.find(p => p.id === keyProvider)?.placeholder || "Paste your API key"}
+              value={unifiedKey}
+              onChange={(e) => setUnifiedKey(e.target.value)}
+              style={{ flex: 1, minWidth: 220, fontSize: 15 }}
             />
-            <button type="button" className="btn btn-secondary" disabled={savingKey || !geminiKey.trim()} onClick={saveGeminiKey}>
-              {savingKey ? "Saving…" : "Save key"}
+            <button type="button" className="btn btn-primary" disabled={savingUnified || !unifiedKey.trim()} onClick={saveUnifiedKey}>
+              {savingUnified ? "Validating…" : "Validate & Save"}
             </button>
             <button type="button" className="btn btn-ghost" disabled={testingKey} onClick={testGemini}>
               {testingKey ? "Testing…" : "Test Gemini"}
             </button>
           </div>
-          {keyMessage && <p style={{ marginTop: 12, fontSize: 13, color: keyMessage.type === "success" ? "var(--success)" : "var(--error)" }}>{keyMessage.text}</p>}
-        </div>
-
-        <div className="glass-card" style={{ padding: 24, marginBottom: 24 }}>
-          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 20, borderBottom: "1px solid var(--border-primary)", paddingBottom: 12 }}>
-            Grok fallback key (optional)
-          </h2>
-          <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 16 }}>
-            An xAI secret (usually starts with xai-). Used only when Gemini hits quota. Stored as vault name <code>grok</code>.
-          </p>
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <input
-              type="password"
-              className="input"
-              placeholder="xai-…"
-              value={grokKey}
-              onChange={(e) => setGrokKey(e.target.value)}
-              style={{ flex: 1, minWidth: 240, fontSize: 16 }}
-            />
-            <button type="button" className="btn btn-secondary" disabled={savingGrok || !grokKey.trim()} onClick={saveGrokKey}>
-              {savingGrok ? "Saving…" : "Save Grok key"}
-            </button>
-          </div>
+          {unifiedMsg.text && <p style={{ marginTop: 8, fontSize: 13, color: unifiedMsg.type === "success" ? "var(--success)" : "var(--error)" }}>{unifiedMsg.text}</p>}
+          {keyMessage.text && <p style={{ marginTop: 8, fontSize: 13, color: keyMessage.type === "success" ? "var(--success)" : "var(--error)" }}>{keyMessage.text}</p>}
         </div>
 
         <div className="glass-card" style={{ padding: 24, marginBottom: 32 }}>
@@ -257,13 +291,19 @@ export default function SettingsPage() {
           <div style={{ display: "flex", gap: 24 }}>
             <div style={{ flex: 1 }}>
               <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 6 }}>Theme</label>
-              <select 
-                className="input" 
-                value={settings?.theme || "dark"}
-                onChange={e => setSettings(s => s ? {...s, theme: e.target.value} : s)}
+              <select
+                className="input"
+                value={settings?.theme || "light"}
+                onChange={e => {
+                  const theme = e.target.value as ThemePref;
+                  setSettings(s => s ? {...s, theme} : s);
+                  // Apply instantly so the user sees the change before saving.
+                  applyTheme(theme);
+                }}
               >
-                <option value="dark">Dark Theme</option>
-                <option value="light">Light Theme</option>
+                <option value="system">System (auto)</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
               </select>
             </div>
             <div style={{ flex: 1 }}>
@@ -273,14 +313,49 @@ export default function SettingsPage() {
                 value={settings?.default_model || "gemini-3.7-flash"}
                 onChange={e => setSettings(s => s ? {...s, default_model: e.target.value} : s)}
               >
-                <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
-                <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
-                <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
-                <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite</option>
+                {availableModels.map(model => <option key={model} value={model}>{model}</option>)}
               </select>
             </div>
           </div>
         </div>
+
+        {user?.role === "admin" && (
+          <div className="glass-card" style={{ padding: 24, marginBottom: 24 }}>
+            <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Admin console</h2>
+            {adminStatsData && (
+              <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 12 }}>
+                {adminStatsData.users_total} users · {adminStatsData.users_active_5h} active in the last 5h · {adminStatsData.runs_total} total runs · {adminStatsData.integrations} integrations
+              </p>
+            )}
+            {adminUsers && adminUsers.users.length > 0 && (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead><tr style={{ textAlign: "left", color: "var(--text-tertiary)" }}>
+                    <th style={{ padding: 6 }}>User</th><th style={{ padding: 6 }}>Role</th>
+                    <th style={{ padding: 6 }}>Runs (5h)</th><th style={{ padding: 6 }}>Total</th><th style={{ padding: 6 }}>Status</th><th></th>
+                  </tr></thead>
+                  <tbody>
+                    {adminUsers.users.map(u => (
+                      <tr key={u.user_id} style={{ borderTop: "1px solid var(--border-primary)" }}>
+                        <td style={{ padding: 8 }}>{u.email}{u.name ? ` · ${u.name}` : ""}</td>
+                        <td style={{ padding: 8 }}>{u.role}</td>
+                        <td style={{ padding: 8 }}>{u.runs_5h ?? "—"}</td>
+                        <td style={{ padding: 8 }}>{u.runs_total ?? "—"}</td>
+                        <td style={{ padding: 8 }}>{u.is_active ? "active" : "disabled"}</td>
+                        <td style={{ padding: 8 }}>
+                          <button type="button" className="btn btn-ghost btn-sm" onClick={() => void toggleUser(u.user_id, !u.is_active)}>
+                            {u.is_active ? "Disable" : "Enable"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {!adminUsers && <p style={{ fontSize: 13, color: "var(--text-tertiary)" }}>Loading users…</p>}
+          </div>
+        )}
 
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
           <button type="submit" className="btn btn-primary" disabled={saving}>
@@ -288,6 +363,8 @@ export default function SettingsPage() {
           </button>
         </div>
       </form>
+
+      <ApiKeyManager />
     </div>
   );
 }

@@ -23,6 +23,11 @@ class ATSAnalyzerService:
             text.extend(proj.bullets)
         return " ".join(text)
 
+    RUBRIC_VERSION = "agentos-match-heuristic-2.0"
+    RUBRIC_WEIGHTS = {"skill_match": 0.35, "keyword_match": 0.25,
+                      "experience_match": 0.2, "education_match": 0.1,
+                      "completeness": 0.1}
+
     def analyze(self, resume: Resume, jd: JobDescription) -> ATSScore:
         # 1. Skill Match (35%)
         # Extract skills from resume explicitly

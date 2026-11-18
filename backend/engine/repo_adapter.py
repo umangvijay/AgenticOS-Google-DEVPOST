@@ -22,7 +22,27 @@ def _parse_dt(value):
     return None
 
 
+def _decode_task_criteria(data: Dict[str, Any]) -> Dict[str, Any]:
+    """§11.0 Finding 3: decode the JSON criteria columns back into the task
+    contract so acceptance criteria survive persistence and reload."""
+    import json as _json
+    for key in ("acceptance_criteria", "requested_outcomes",
+                "allowed_action_scope"):
+        col = f"{key}_json"
+        raw = data.get(col)
+        if raw is not None:
+            try:
+                data[key] = _json.loads(raw) if isinstance(raw, str) else raw
+            except (ValueError, TypeError):
+                data[key] = []
+    cp = data.get("completion_policy")
+    if cp is not None:
+        data["completion_policy"] = str(cp)
+    return data
+
+
 def dict_to_task(data: Dict[str, Any], run: Optional[Dict[str, Any]] = None) -> Task:
+    data = _decode_task_criteria(data)
     payload = dict(data)
     for key in ("started_at", "completed_at", "lease_started_at", "lease_expires_at"):
         if key in payload:
@@ -56,6 +76,12 @@ def dict_to_run(data: Dict[str, Any]) -> WorkflowRun:
         status=data.get("status", "PENDING"),
         tasks=tasks,
         created_at=created,
+        parent_run_id=data.get("parent_run_id"),
+        thread_id=data.get("thread_id"),
+        # Phase 4 §4.0B (R3): organization ownership must survive persistence
+        # → engine load, or org-scoped authorization and accounting lose
+        # their subject exactly when the background gate needs it.
+        org_id=data.get("org_id"),
     )
 
 
@@ -63,6 +89,12 @@ def task_updates(task: Task) -> Dict[str, Any]:
     dump = task.model_dump(mode="json")
     dump.pop("task_id", None)
     dump.pop("run_id", None)
+    # §10.7: serialize structured fields for JSON column storage.
+    for key in ("acceptance_criteria", "requested_outcomes",
+                "allowed_action_scope"):
+        if key in dump and isinstance(dump[key], list):
+            import json as _json
+            dump[f"{key}_json"] = _json.dumps(dump.pop(key))
     return dump
 
 

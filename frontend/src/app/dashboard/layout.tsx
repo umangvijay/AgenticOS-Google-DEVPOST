@@ -1,15 +1,20 @@
 "use client";
 
+import { ConnectionStatus } from "@/components/ConnectionStatus";
 import { useAuth } from "@/lib/auth-context";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { useState, useEffect, ReactNode, useRef } from "react";
+import ThemeSwitch from "@/components/ThemeSwitch";
+import BrandMark from "@/components/BrandMark";
+import { applyTheme, watchSystemTheme, type ThemePref } from "@/lib/theme";
 import { getUnreadCount, listNotifications, markNotificationRead, markAllNotificationsRead, listWorkflows, Notification, WorkflowRun } from "@/lib/api";
 import ContextUsageButton from "@/components/ContextUsage";
+import { AmbientOrbs } from "@/components/GlassPanel";
 
 // ── Navigation Items ─────────────────────────────────────────────
 const NEW_CHAT = {
-  label: "New chat",
+  label: "Board",
   href: "/dashboard",
   icon: (
     <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
@@ -20,7 +25,12 @@ const NEW_CHAT = {
 
 const NAV_ITEMS = [
   {
-    label: "Runs",
+    label: "Sheets",
+    href: "/dashboard/operations",
+    icon: <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M4 19V5m0 14h16M8 15v-4m5 4V7m5 8v-6" /></svg>,
+  },
+  {
+    label: "Builds",
     href: "/dashboard/workflows",
     icon: (
       <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
@@ -29,12 +39,41 @@ const NAV_ITEMS = [
     ),
   },
   {
-    label: "Integrations",
+    label: "Stamps",
     href: "/dashboard/integrations",
     icon: (
       <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
         <path d="M12 2v6m0 8v6M2 12h6m8 0h6" />
         <circle cx="12" cy="12" r="3" />
+      </svg>
+    ),
+  },
+  {
+    label: "Catalog",
+    href: "/dashboard/catalog",
+    icon: (
+      <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+        <path d="M4 6h16M4 12h16M4 18h10" />
+      </svg>
+    ),
+  },
+  {
+    label: "Organizations",
+    href: "/dashboard/orgs",
+    icon: (
+      <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+        <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />
+      </svg>
+    ),
+  },
+  {
+    label: "Agents",
+    href: "/dashboard/agents",
+    icon: (
+      <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+        <circle cx="12" cy="8" r="4" /><path d="M5 21a7 7 0 0114 0M19 8h3m-1.5-1.5v3" />
       </svg>
     ),
   },
@@ -90,7 +129,8 @@ const NAV_ITEMS = [
 ];
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
-  return <DashboardInner>{children}</DashboardInner>;
+  return <DashboardInner><ConnectionStatus />
+      {children}</DashboardInner>;
 }
 
 function DashboardInner({ children }: { children: ReactNode }) {
@@ -101,8 +141,11 @@ function DashboardInner({ children }: { children: ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [llmStatus, setLlmStatus] = useState<{ status: string; detail: string } | null>(null);
+  const [llmBannerDismissed, setLlmBannerDismissed] = useState(false);
   const [recents, setRecents] = useState<WorkflowRun[]>([]);
   const [recentsError, setRecentsError] = useState("");
+  const [recentsLoading, setRecentsLoading] = useState(true);
   
   // Notification Panel State
   const [showNotifications, setShowNotifications] = useState(false);
@@ -116,33 +159,56 @@ function DashboardInner({ children }: { children: ReactNode }) {
     }
   }, [isLoading, isAuthenticated, router]);
 
+  // Apply saved theme on page load and persist for first-paint script
   useEffect(() => {
+    if (!isAuthenticated) return;
+    (async () => {
+      try {
+        const { settings } = await import("@/lib/api").then((m) => m.getSettings());
+        const theme = settings?.theme || "system";
+        applyTheme((theme as ThemePref) || "system");
+      } catch {
+        // Default to light if settings fail to load
+      }
+    })();
+  }, [isAuthenticated]);
+
+  useEffect(() => watchSystemTheme(), []);
+
+  useEffect(() => {
+    // Route changes should close the transient mobile navigation drawer.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMobileOpen(false);
   }, [pathname]);
 
   useEffect(() => {
     const titles: Record<string, string> = {
-      "/dashboard": "New chat · AgentOS",
-      "/dashboard/workflows": "Runs · AgentOS",
-      "/dashboard/integrations": "Integrations · AgentOS",
-      "/dashboard/integrations/create": "Create MCP · AgentOS",
-      "/dashboard/studio": "Studio · AgentOS",
-      "/dashboard/resume": "Resume · AgentOS",
-      "/dashboard/credentials": "Vault · AgentOS",
-      "/dashboard/schedules": "Schedules · AgentOS",
-      "/dashboard/settings": "Settings · AgentOS",
-      "/dashboard/notifications": "Notifications · AgentOS",
+      "/dashboard": "New chat · Sandtable",
+      "/dashboard/workflows": "Runs · Sandtable",
+      "/dashboard/integrations": "Integrations · Sandtable",
+      "/dashboard/catalog": "Catalog · Sandtable",
+      "/dashboard/orgs": "Organizations · Sandtable",
+      "/dashboard/integrations/create": "Create MCP · Sandtable",
+      "/dashboard/agents": "Agents · Sandtable",
+      "/dashboard/studio": "Studio · Sandtable",
+      "/dashboard/resume": "Resume · Sandtable",
+      "/dashboard/credentials": "Vault · Sandtable",
+      "/dashboard/schedules": "Schedules · Sandtable",
+      "/dashboard/settings": "Settings · Sandtable",
+      "/dashboard/notifications": "Notifications · Sandtable",
     };
     if (titles[pathname]) document.title = titles[pathname];
-    else if (pathname.startsWith("/dashboard/workspace/")) document.title = "Chat · AgentOS";
-    else if (pathname.startsWith("/dashboard/workflows/")) document.title = "Run detail · AgentOS";
-    else if (pathname.startsWith("/dashboard/integrations/")) document.title = "Integration · AgentOS";
-    else if (pathname.startsWith("/dashboard")) document.title = "Dashboard · AgentOS";
+    else if (pathname.startsWith("/dashboard/workspace/")) document.title = "Chat · Sandtable";
+    else if (pathname.startsWith("/dashboard/workflows/")) document.title = "Run detail · Sandtable";
+    else if (pathname.startsWith("/dashboard/integrations/")) document.title = "Integration · Sandtable";
+    else if (pathname.startsWith("/dashboard")) document.title = "Dashboard · Sandtable";
   }, [pathname]);
 
   useEffect(() => {
     try {
       const stored = localStorage.getItem("agentos_sidebar_collapsed");
+      // The browser-only persisted preference is applied after hydration.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       if (stored === "1") setCollapsed(true);
       if (stored === "0") setCollapsed(false);
     } catch { /* ignore */ }
@@ -178,18 +244,36 @@ function DashboardInner({ children }: { children: ReactNode }) {
       try {
         const data = await listWorkflows(50);
         const workflows = data.workflows || [];
-        const byThread = new Map<string, WorkflowRun>();
+        // Group by thread. Keep the OLDEST run for title/href (thread root),
+        // but track the newest created_at for sort order.
+        const byThread = new Map<string, { root: WorkflowRun; latestAt: string }>();
         for (const wf of workflows) {
           const tid = wf.thread_id || wf.parent_run_id || wf.run_id;
           const prev = byThread.get(tid);
-          if (!prev || String(wf.created_at || "") >= String(prev.created_at || "")) {
-            byThread.set(tid, wf);
+          if (!prev) {
+            byThread.set(tid, { root: wf, latestAt: String(wf.created_at || "") });
+          } else {
+            const wfAt = String(wf.created_at || "");
+            // Keep whichever is OLDER as the root (first goal = title)
+            if (wfAt < String(prev.root.created_at || "")) {
+              prev.root = wf;
+            }
+            // Track newest timestamp for sort
+            if (wfAt > prev.latestAt) {
+              prev.latestAt = wfAt;
+            }
           }
         }
-        setRecents([...byThread.values()]);
+        // Sort by most recent activity descending
+        const sorted = [...byThread.values()]
+          .sort((a, b) => b.latestAt.localeCompare(a.latestAt))
+          .map((entry) => entry.root);
+        setRecents(sorted);
         setRecentsError("");
       } catch (err: unknown) {
         setRecentsError(err instanceof Error ? err.message : "Could not load chats");
+      } finally {
+        setRecentsLoading(false);
       }
     };
     load();
@@ -208,6 +292,24 @@ function DashboardInner({ children }: { children: ReactNode }) {
     poll();
     const interval = setInterval(poll, 15000);
     return () => clearInterval(interval);
+  }, [isAuthenticated]);
+
+  // LLM credential status (public /health) — warn when the key is dead so
+  // users understand why chat/MCP-from-description fails.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const apiBase = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1");
+        const healthUrl = apiBase.replace(/\/api\/v1\/?$/, "") || apiBase;
+        const res = await fetch(`${healthUrl}/health`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setLlmStatus(data.llm_status || null);
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
   }, [isAuthenticated]);
 
   // Load notifications when panel opens
@@ -256,7 +358,7 @@ function DashboardInner({ children }: { children: ReactNode }) {
     return (
       <div className="mesh-gradient" style={{ minHeight: "100dvh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
         <div className="glass-card" style={{ textAlign: "center", maxWidth: 420, padding: 32 }}>
-          <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>Sign in to AgentOS</h1>
+          <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>Sign in to Sandtable</h1>
           <p style={{ color: "var(--text-secondary)", marginBottom: 20 }}>
             The dashboard is for an authenticated session. Sign in, or Get Started as a guest.
           </p>
@@ -273,7 +375,7 @@ function DashboardInner({ children }: { children: ReactNode }) {
   const isWorkspace = pathname === "/dashboard" || pathname.startsWith("/dashboard/workspace");
   const pageTitle =
     NAV_ITEMS.find((i) => pathname.startsWith(i.href))?.label
-    || (pathname.startsWith("/dashboard/workspace") ? "Chat" : "New chat");
+    || (pathname.startsWith("/dashboard/workspace") ? "Chat" : "Board");
 
   return (
     <div className="mesh-gradient dashboard-shell">
@@ -286,26 +388,15 @@ function DashboardInner({ children }: { children: ReactNode }) {
           onClick={() => setMobileOpen(false)}
         />
       )}
-      <aside className={`sidebar ${!isMobile && collapsed ? "collapsed" : ""} ${mobileOpen ? "mobile-open" : ""}`}>
+      <aside aria-label="Workspace navigation" className={`sidebar ${!isMobile && collapsed ? "collapsed" : ""} ${mobileOpen ? "mobile-open" : ""}`}>
         {/* Logo */}
         <Link href="/" style={{ textDecoration: "none" }}>
           <div style={{
             padding: "20px 16px", display: "flex", alignItems: "center",
             gap: 12, borderBottom: "1px solid var(--border-primary)",
           }}>
-            <div style={{
-              width: 36, height: 36, borderRadius: "var(--radius-md)",
-              background: "linear-gradient(135deg, var(--accent), #8b5cf6)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 18, fontWeight: 800, color: "white", flexShrink: 0,
-            }}>
-              A
-            </div>
-            {showLabels && (
-              <span style={{ fontSize: 18, fontWeight: 700 }} className="gradient-text">
-                AgentOS
-              </span>
-            )}
+            <BrandMark size={30} withWordmark={showLabels} />
+            {showLabels && <span style={{ display: "none" }} aria-hidden="true">Sandtable</span>}
           </div>
         </Link>
 
@@ -323,22 +414,36 @@ function DashboardInner({ children }: { children: ReactNode }) {
           {showLabels && (
             <div className="sidebar-section-label">Recents</div>
           )}
-          {showLabels && recents.slice(0, 14).map((wf) => (
+          {showLabels && recents.slice(0, 14).map((wf) => {
+            const threadHref = `/dashboard/workspace/${wf.thread_id || wf.run_id}`;
+            return (
             <Link
-              key={wf.run_id}
-              href={`/dashboard/workspace/${wf.run_id}`}
-              className={`sidebar-recent ${pathname === `/dashboard/workspace/${wf.run_id}` || pathname === `/dashboard/workspace/${wf.thread_id || ""}` ? "active" : ""}`}
+              key={wf.thread_id || wf.run_id}
+              href={threadHref}
+              className={`sidebar-recent ${pathname === threadHref || pathname === `/dashboard/workspace/${wf.run_id}` ? "active" : ""}`}
               onClick={() => setMobileOpen(false)}
               title={wf.goal}
             >
               <span className="truncate">{wf.goal}</span>
             </Link>
-          ))}
+            );
+          })}
           {showLabels && recentsError && recents.length === 0 && (
             <div className="sidebar-empty" style={{ color: "var(--error)" }}>{recentsError}</div>
           )}
-          {showLabels && !recentsError && recents.length === 0 && (
-            <div className="sidebar-empty">No chats yet</div>
+          {showLabels && (user?.role === "admin" || user?.role === "super_admin") && (
+            <Link href="/admin" className={`sidebar-recent ${pathname === "/admin" ? "active" : ""}`}>
+              <span className="truncate">🛡 Control Center</span>
+            </Link>
+          )}
+          {showLabels && recentsLoading && recents.length === 0 && (
+            <div className="sidebar-empty" role="status">Loading saved chats…</div>
+          )}
+          {showLabels && !recentsLoading && !recentsError && recents.length === 0 && (
+            <div className="sidebar-empty" role="status">
+              <strong>No saved chats yet</strong>
+              <span>Your runs and any planning errors will appear here.</span>
+            </div>
           )}
 
           {showLabels && <div className="sidebar-section-label">Workspace</div>}
@@ -387,7 +492,34 @@ function DashboardInner({ children }: { children: ReactNode }) {
       </aside>
 
       {/* ── Main content ───────────────────────────────────────── */}
+      <AmbientOrbs />
       <div className={`main-content ${!isMobile && collapsed ? "sidebar-collapsed" : ""}`} style={{ flex: 1 }}>
+        {/* LLM credential warning */}
+        {llmStatus && ["invalid", "missing", "unknown", "catalog_ok"].includes(llmStatus.status) && !llmBannerDismissed && (
+          <div className="llm-status-banner" role="status">
+            <span style={{ flexShrink: 0 }}>⚠️</span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              {llmStatus.status === "catalog_ok"
+                ? "Gemini accepted the key for model discovery, but text generation has not been verified. Automation and MCP creation may still fail until a live generation succeeds."
+                : llmStatus.status === "invalid"
+                ? "Your Gemini API key is invalid or expired — chat planning and MCP builds from descriptions need it."
+                : "No working Gemini key is configured — chat planning and MCP builds from descriptions need it."}{" "}
+              MCP Forge from OpenAPI URLs and pasted specs still works without a key.
+            </span>
+            <Link href="/dashboard/settings" className="btn btn-secondary btn-sm" style={{ flexShrink: 0 }}>
+              Fix in Settings
+            </Link>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              style={{ flexShrink: 0, padding: 4 }}
+              aria-label="Dismiss"
+              onClick={() => setLlmBannerDismissed(true)}
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {/* Topbar */}
         <header className="topbar">
           <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 }}>
@@ -396,6 +528,7 @@ function DashboardInner({ children }: { children: ReactNode }) {
               className="btn btn-ghost btn-sm"
               style={{ padding: 4, flexShrink: 0 }}
               onClick={toggleSidebar}
+              aria-expanded={isMobile ? mobileOpen : !collapsed}
               aria-label={showLabels ? "Collapse sidebar" : "Expand sidebar"}
               title={showLabels ? "Collapse sidebar" : "Expand sidebar"}
             >
@@ -403,17 +536,24 @@ function DashboardInner({ children }: { children: ReactNode }) {
                 <path d="M4 6h16M4 12h16M4 18h16" />
               </svg>
             </button>
+            <div className="workspace-heading">
+              <nav aria-label="Workspace breadcrumb"><Link href="/dashboard">WORKSPACE</Link><span aria-hidden="true">/</span><span>{isWorkspace ? "BOARD" : "TOOLS"}</span></nav>
             <h1 className="truncate" style={{ fontSize: 16, fontWeight: 600, color: "var(--text-primary)" }}>
               {pageTitle}
             </h1>
+            </div>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+            <ThemeSwitch />
             <ContextUsageButton />
             {/* Notification bell */}
             <div style={{ position: "relative" }} ref={panelRef}>
               <button
                 className="btn btn-ghost btn-sm"
+                aria-label={`Notifications${unreadCount ? `, ${unreadCount} unread` : ""}`}
+                aria-expanded={showNotifications}
+                aria-controls="workspace-notifications"
                 onClick={() => setShowNotifications(!showNotifications)}
                 style={{ position: "relative" }}
               >
@@ -435,7 +575,7 @@ function DashboardInner({ children }: { children: ReactNode }) {
 
               {/* Notification Slide-Out Panel */}
               {showNotifications && (
-                <div className="glass-card animate-slide-in" style={{
+                <div id="workspace-notifications" role="region" aria-label="Notifications" className="glass-card animate-slide-in" style={{
                   position: "absolute", top: "100%", right: 0, width: "min(360px, calc(100vw - 24px))",
                   marginTop: 8, zIndex: 100, display: "flex", flexDirection: "column",
                   maxHeight: "80vh", overflow: "hidden", border: "1px solid var(--border-primary)"
@@ -452,7 +592,7 @@ function DashboardInner({ children }: { children: ReactNode }) {
                   <div style={{ flex: 1, overflowY: "auto", padding: "12px 0" }}>
                     {notifications.length === 0 ? (
                       <div style={{ padding: 32, textAlign: "center", color: "var(--text-tertiary)", fontSize: 14 }}>
-                        All caught up! Your agents are running smoothly.
+                        You’re all caught up. New notifications will appear here.
                       </div>
                     ) : (
                       notifications.map(n => (

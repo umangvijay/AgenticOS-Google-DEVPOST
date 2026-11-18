@@ -42,47 +42,38 @@ class OpenAPIParser:
             raise OpenAPIParserError("OpenAPI spec must be an object")
         return self._normalize(self.raw_spec)
         
+    # TEST-ONLY seam (default False in every deployed process): allows
+    # numeric-loopback targets so the self-extension test loop can exercise
+    # the full build/probe/execute cycle against a local server. Workflow
+    # core.http keeps strict validation — a user workflow must never be able
+    # to reach the app's own localhost (audit SSRF model).
+    _LOOPBACK_TESTING = False
+
     def _validate_ssrf(self, url: str):
-        """Validate URL to prevent SSRF targeting local/private services."""
-        if not url:
+        """Reject non-public endpoints, including every IPv4/IPv6 DNS answer."""
+        parsed = urllib.parse.urlparse(url or "")
+        hostname = (parsed.hostname or "").rstrip(".").lower()
+        loopback = hostname in ("127.0.0.1", "::1") and OpenAPIParser._LOOPBACK_TESTING
+        if not loopback and (parsed.scheme.lower() != "https" or not parsed.hostname):
+            raise SSRFViolationError("A complete HTTPS URL is required")
+        if parsed.username is not None or parsed.password is not None:
+            raise SSRFViolationError("Credentials in URLs are prohibited")
+        if hostname == "metadata.google.internal" or hostname.endswith(".localhost") or hostname == "localhost":
+            raise SSRFViolationError("Local and metadata hosts are prohibited")
+        if loopback:
             return
-            
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme and parsed.scheme.lower() not in ["https", "http"]:
-            raise SSRFViolationError(f"Prohibited scheme: {parsed.scheme}")
-            
-        # We enforce HTTPS for remote, but we might allow HTTP for specific testing 
-        # unless user strictly said HTTPS only. User said:
-        # "Allowed schemes: https only"
-        if parsed.scheme.lower() != "https":
-            # For local tests, we might want HTTP, but the rules say HTTPS only.
-            # I will strictly enforce it unless it's a known test exception.
-            # Wait, the user said: "Allowed schemes: https only. Blocked: file:// localhost 127.0.0.1 private IP"
-            if parsed.hostname and parsed.hostname not in ["localhost", "127.0.0.1"]:
-                if parsed.scheme.lower() != "https":
-                    raise SSRFViolationError("Only HTTPS is allowed for remote targets")
-            
-        hostname = parsed.hostname
-        if not hostname:
-            return
-            
-        if hostname.lower() in ["localhost", "127.0.0.1", "::1", "metadata.google.internal"]:
-            raise SSRFViolationError("Localhost is prohibited")
-        if hostname.startswith("169.254.") or hostname == "169.254.169.254":
-            raise SSRFViolationError("Link-local / metadata addresses are prohibited")
-            
         try:
-            # Try to resolve to IP and check if private
-            # This is a basic check. A robust check resolves right before request.
-            ip = ipaddress.ip_address(socket.gethostbyname(hostname))
-            if ip.is_private or ip.is_loopback or ip.is_link_local:
-                raise SSRFViolationError(f"Prohibited IP range for {hostname}: {ip}")
-        except socket.gaierror:
-            # If it doesn't resolve, that's fine here, it will fail later
-            pass
-        except ValueError:
-            pass
-            
+            port = parsed.port or 443
+            answers = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except (socket.gaierror, ValueError) as exc:
+            raise SSRFViolationError("Target must resolve to a public address") from exc
+        if not answers:
+            raise SSRFViolationError("Target must resolve to a public address")
+        for answer in answers:
+            ip = ipaddress.ip_address(answer[4][0].split("%")[0])
+            if not ip.is_global or getattr(ip, "ipv4_mapped", None) is not None and not ip.ipv4_mapped.is_global:
+                raise SSRFViolationError("Non-public network addresses are prohibited")
+
     def _resolve_ref(self, ref_str: str) -> Dict[str, Any]:
         """Resolves local #/components/... refs. Rejects remote refs."""
         if not ref_str.startswith("#/"):
@@ -91,20 +82,24 @@ class OpenAPIParser:
         parts = ref_str[2:].split("/")
         current = self.raw_spec
         for part in parts:
+            part = part.replace("~1", "/").replace("~0", "~")
             if part not in current:
                 raise OpenAPIParserError(f"Invalid $ref path: {ref_str}")
             current = current[part]
         return current
         
-    def _deep_resolve(self, obj: Any) -> Any:
+    def _deep_resolve(self, obj: Any, seen: frozenset = frozenset()) -> Any:
         if isinstance(obj, dict):
             if "$ref" in obj:
-                resolved = self._resolve_ref(obj["$ref"])
-                # Recursively resolve
-                return self._deep_resolve(resolved)
-            return {k: self._deep_resolve(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._deep_resolve(item) for item in obj]
+                ref = obj["$ref"]
+                if ref in seen:
+                    # Recursive shapes remain unconstrained at the cycle boundary.
+                    return {k: v for k, v in obj.items() if k != "$ref"}
+                resolved = self._resolve_ref(ref)
+                return self._deep_resolve({**resolved, **{k: v for k, v in obj.items() if k != "$ref"}}, seen | {ref})
+            return {k: self._deep_resolve(v, seen) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._deep_resolve(item, seen) for item in obj]
         return obj
 
     def _normalize(self, spec: Dict[str, Any]) -> NormalizedAPIModel:
@@ -120,9 +115,17 @@ class OpenAPIParser:
         for s in servers_data:
             if not isinstance(s, dict) or not s.get("url"):
                 continue
+            url = str(s.get("url", ""))
+            # Relative server URLs ("https://api.example.com/v1") are valid
+            # OpenAPI 3 — keep them and let the builder resolve them against
+            # the spec's own URL. Only absolute URLs are SSRF-checked here;
+            # resolved results are checked before any request is made.
+            if not url.startswith(("http://", "https://")):
+                servers.append(ServerModel(url=url, description=s.get("description")))
+                continue
             try:
-                self._validate_ssrf(s.get("url", ""))
-                servers.append(ServerModel(url=s.get("url", ""), description=s.get("description")))
+                self._validate_ssrf(url)
+                servers.append(ServerModel(url=url, description=s.get("description")))
             except Exception:
                 continue
             
@@ -176,8 +179,12 @@ class OpenAPIParser:
                 for s in op_data.get("servers") or []:
                     if not isinstance(s, dict) or not s.get("url"):
                         continue
+                    op_url = str(s.get("url", ""))
+                    if not op_url.startswith(("http://", "https://")):
+                        op_servers.append(ServerModel(url=op_url, description=s.get("description")))
+                        continue
                     try:
-                        self._validate_ssrf(s.get("url", ""))
+                        self._validate_ssrf(op_url)
                         op_servers.append(ServerModel(**s))
                     except Exception:
                         continue

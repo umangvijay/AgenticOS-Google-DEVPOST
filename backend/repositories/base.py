@@ -348,6 +348,22 @@ class BaseScheduleRepository(ABC):
         """Get recent execution history for a schedule."""
         ...
 
+    async def claim_occurrence(self, schedule_id: str, occurrence: str,
+                               run_id: str) -> bool:
+        """Phase 3 §3.15: atomic claim of one schedule occurrence. Returns
+        False when another worker already claimed it. Default: unsupported
+        (single-claimant deployments); SQLite/Firestore implement for real."""
+        return True
+
+    async def finish_occurrence(self, schedule_id: str, occurrence: str,
+                                status: str) -> None:
+        """Mark a claimed occurrence terminal (optional bookkeeping)."""
+        return None
+
+    async def release_occurrence(self, schedule_id: str, occurrence: str) -> bool:
+        """Drop a claim so redelivery may re-claim (§3.15 recovery path)."""
+        return False
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  IDEMPOTENCY REPOSITORY
@@ -355,9 +371,44 @@ class BaseScheduleRepository(ABC):
 
 class BaseIdempotencyRepository(ABC):
     """
-    Exactly-once execution ledger.
+    Execution deduplication ledger; remote effects require provider reconciliation.
     Prevents duplicate tool calls in distributed/concurrent environments.
     """
+
+    @abstractmethod
+    async def commit_uncertain(self, key: str) -> None:
+        """Quarantine an ambiguous external outcome; ordinary retry must not release it."""
+        ...
+
+    async def get_entry(self, key: str) -> Optional[Dict[str, Any]]:
+        """§29.19 revision: read one ledger entry ({workflow_id, task_id,
+        status, result_payload}) WITHOUT claiming it — the webhook's
+        business-delivery key compares the recorded body digest to
+        distinguish a duplicate from a conflicting reuse. Repositories
+        that cannot support reads return None (the caller then treats
+        the business key as best-effort signature dedup only)."""
+        return None
+
+    async def sweep_stale_running(self, older_than_seconds: int = 1800) -> int:
+        """Quarantine 'running' entries orphaned by a worker crash (audit F07).
+        Default no-op for repositories without the sweep; implement to make
+        crash-orphaned locks recoverable as 'uncertain', never 'failed'."""
+        return 0
+
+    async def reconcile_uncertain(self, key: str, outcome: str, result_payload: Optional[str] = None) -> None:
+        """Deliberate resolution of an uncertain outcome after a provider
+        receipt check. Optional operation."""
+        raise NotImplementedError("This ledger does not support reconciliation")
+
+    @abstractmethod
+    async def commit_pause(self, key: str) -> None:
+        """Make a human-paused call reclaimable without erasing completed calls."""
+        ...
+
+    @abstractmethod
+    async def reset_failed_task(self, workflow_id: str, task_id: str) -> None:
+        """Allow an explicitly requested retry of failed calls for one task."""
+        ...
 
     @abstractmethod
     async def atomic_insert(self, key: str, workflow_id: str, task_id: str) -> bool:
@@ -399,6 +450,149 @@ class BaseAuditRepository(ABC):
     @abstractmethod
     async def get_events(self, resource_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         """Get audit events for a resource."""
+        ...
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  ADAPTIVE POLICY REPOSITORY (online learning from task outcomes)
+# ═══════════════════════════════════════════════════════════════════
+
+class BaseAdaptivePolicyRepository(ABC):
+    """Per-model outcome statistics for the adaptive selection policy.
+    The policy reorders candidate models using UCB1-style scoring; the
+    repository is the learning system's persistent memory."""
+
+    @abstractmethod
+    async def record_outcome(self, model: str, success: bool, latency_ms: float) -> None:
+        """Update attempt counts and the EWMA latency for a model."""
+        ...
+
+    @abstractmethod
+    async def get_stats(self) -> List[Dict[str, Any]]:
+        """All model stats rows: model, attempts, successes, failures, ewma_latency_ms."""
+        ...
+
+    @abstractmethod
+    async def reset(self) -> int:
+        """Forget all learned statistics. Returns rows removed."""
+        ...
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  API KEYS REPOSITORY
+# ═══════════════════════════════════════════════════════════════════
+
+class BaseApiKeysRepository(ABC):
+    """Per-user programmatic API keys. Only hashes are stored; the raw
+    key is returned exactly once at creation. Revocable individually."""
+
+    @abstractmethod
+    async def create_key(self, user_id: str, key_hash: str, prefix: str, name: str) -> str:
+        """Store a key hash. Returns the key id."""
+        ...
+
+    @abstractmethod
+    async def resolve_key(self, key_hash: str) -> Optional[Dict[str, Any]]:
+        """Resolve a hash to {user_id, key_id} if live. Touches last_used_at."""
+        ...
+
+    @abstractmethod
+    async def list_keys(self, user_id: str) -> List[Dict[str, Any]]:
+        """List the user's keys — metadata only, never the hash."""
+        ...
+
+    @abstractmethod
+    async def revoke_key(self, user_id: str, key_id: str) -> bool:
+        """Revoke one key. Returns True if a live key was revoked."""
+        ...
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  ORGANIZATION REPOSITORY (enterprise RBAC foundation)
+# ═══════════════════════════════════════════════════════════════════
+
+class BaseOrgRepository(ABC):
+    """Orgs and membership. Roles: owner > admin > member > viewer.
+    The owner cannot be removed or demoted — transfer is a delete-and-
+    recreate concern, keeping the accountability chain intact."""
+
+    @abstractmethod
+    async def create_org(self, name: str, owner_id: str) -> Dict[str, Any]:
+        """Create an org with the creator as owner member. Returns the org row."""
+        ...
+
+    @abstractmethod
+    async def get_org(self, org_id: str) -> Optional[Dict[str, Any]]:
+        ...
+
+    @abstractmethod
+    async def list_orgs_for_user(self, user_id: str) -> List[Dict[str, Any]]:
+        """Orgs the user belongs to, each with their role."""
+        ...
+
+    @abstractmethod
+    async def get_member_role(self, org_id: str, user_id: str) -> Optional[str]:
+        """The user's role in the org, or None if not a member."""
+        ...
+
+    @abstractmethod
+    async def list_members(self, org_id: str) -> List[Dict[str, Any]]:
+        ...
+
+    @abstractmethod
+    async def add_member(self, org_id: str, user_id: str, role: str, added_by: str) -> bool:
+        """Add (or re-add) a member. Returns False if the org is missing."""
+        ...
+
+    @abstractmethod
+    async def set_member_role(self, org_id: str, user_id: str, role: str) -> bool:
+        """Set a member's role. Fails for the owner (role is immutable)."""
+        ...
+
+    @abstractmethod
+    async def remove_member(self, org_id: str, user_id: str) -> bool:
+        """Remove a member. Fails for the owner."""
+        ...
+
+    @abstractmethod
+    async def transfer_ownership(self, org_id: str, current_owner_id: str,
+                                 new_owner_id: str) -> Dict[str, Any]:
+        """Phase 1.8: the ONLY operation that moves the owner role. Must be
+        atomic, preserve the single-owner invariant, and audit atomically."""
+        ...
+
+    @abstractmethod
+    async def delete_org(self, org_id: str) -> bool:
+        """Delete an org and (via cascade) its members."""
+        ...
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  TOKEN DENYLIST REPOSITORY
+# ═══════════════════════════════════════════════════════════════════
+
+class BaseTokenDenylistRepository(ABC):
+    """
+    Revoked access-token jti registry (server-side logout).
+
+    Logout must invalidate the still-valid access JWT immediately, not
+    only the refresh tokens. Entries are stored with the token's own
+    expiry so the purge is trivial and the denylist cannot grow forever.
+    """
+
+    @abstractmethod
+    async def revoke_jti(self, jti: str, expires_at: datetime) -> None:
+        """Mark a token jti as revoked until its natural expiry."""
+        ...
+
+    @abstractmethod
+    async def is_revoked(self, jti: str) -> bool:
+        """True if the jti has been revoked and has not yet expired."""
+        ...
+
+    @abstractmethod
+    async def purge_expired(self) -> int:
+        """Delete expired denylist entries. Returns count purged."""
         ...
 
 

@@ -139,19 +139,9 @@ def _is_orchestrator_agent(agent: str) -> bool:
 
 
 def wire_mcp_then_use(definition: WorkflowDefinition) -> WorkflowDefinition:
-    """Drop unknown deps (which leave tasks WAITING forever) and make orchestrator wait on MCP builds."""
-    ids = {t.task_id for t in definition.tasks}
+    """Order MCP consumers after builds without discarding invalid dependencies."""
     mcp_ids = [t.task_id for t in definition.tasks if t.agent == "core.mcp_build"]
     for task in definition.tasks:
-        orig = list(task.dependencies or [])
-        valid = [d for d in orig if d in ids and d != task.task_id]
-        if valid != orig:
-            logger.warning(
-                "Dropped unknown/self dependencies on %s: %s",
-                task.task_id,
-                sorted(set(orig) - set(valid)),
-            )
-            task.dependencies = valid
         if mcp_ids and _is_orchestrator_agent(task.agent):
             missing = [mid for mid in mcp_ids if mid not in task.dependencies]
             if missing:
@@ -161,9 +151,9 @@ def wire_mcp_then_use(definition: WorkflowDefinition) -> WorkflowDefinition:
 
 
 def prepare_dag(definition: WorkflowDefinition) -> WorkflowDefinition:
-    ensure_unique_task_ids(definition)
     wire_mcp_then_use(definition)
     validate_dag(definition)
+    validate_inputs_and_references(definition)
     return definition
 
 class DAGValidationError(Exception):
@@ -221,3 +211,53 @@ def validate_dag(definition: WorkflowDefinition) -> None:
             dfs(task_id)
 
     logger.info(f"DAG validation successful for {len(task_ids)} tasks.")
+
+
+def validate_inputs_and_references(definition: WorkflowDefinition) -> None:
+    """Reject missing core inputs and references that cannot be scheduled safely."""
+    from backend.config.settings import settings
+    tasks = {task.task_id: task for task in definition.tasks}
+    if len(tasks) > settings.MAX_WORKFLOW_TASKS:
+        raise DAGValidationError("Workflow exceeds the configured task limit")
+    if not tasks:
+        raise DAGValidationError("A workflow must contain at least one task")
+    required = {
+        "core.http": ("url",), "core.health": ("url",),
+        "core.email": ("to", "subject", "body"),
+        "core.mcp_build": ("source", "method"),
+        "core.set": ("fields",), "core.if": ("condition",),
+    }
+    supported = {*required, "core.chat", "core.merge", "core.loop"}
+
+    def ancestors(task):
+        result = set(task.dependencies)
+        for dep in task.dependencies:
+            result.update(ancestors(tasks[dep]))
+        return result
+
+    def references(value):
+        if isinstance(value, dict):
+            for child in value.values():
+                yield from references(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from references(child)
+        elif isinstance(value, str):
+            yield from re.findall(r"\{\{\s*(.*?)\s*\}\}", value)
+
+    for task in definition.tasks:
+        if task.timeout_seconds > settings.MAX_TASK_TIMEOUT_SECONDS or task.max_retries > settings.MAX_TASK_RETRIES:
+            raise DAGValidationError(f"Task {task.task_id} exceeds configured execution limits")
+        if task.agent.startswith("core.") and task.agent not in supported:
+            raise DAGValidationError(f"Unknown core node: {task.agent}")
+        for field in required.get(task.agent, ()):
+            value = task.input_data.get(field)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                raise DAGValidationError(f"Task {task.task_id} requires {field}")
+        allowed_sources = ancestors(task)
+        for expr in references(task.input_data):
+            parts = expr.strip().split('.')
+            if len(parts) < 3 or parts[0] != "tasks" or parts[2] != "output":
+                raise DAGValidationError(f"Unsupported workflow reference: {expr}")
+            if parts[1] not in allowed_sources:
+                raise DAGValidationError(f"Task {task.task_id} references non-dependency {parts[1]}")

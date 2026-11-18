@@ -1,4 +1,4 @@
-import { useMemo, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { 
   ReactFlow, 
   Controls, 
@@ -53,7 +53,13 @@ export default function WorkflowGraph({ workflow }: { workflow: WorkflowRun }) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  // §19.18: selected task IDENTITY (not a stale object snapshot) —
+  // details derive from CURRENT data so a deleted task cannot show
+  // stale content and status always reflects the latest state.
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const selectedTask = workflow.tasks.find(
+    (t) => t.task_id === selectedTaskId) ?? null;
+  const selectTask = (t: Task | null) => setSelectedTaskId(t?.task_id ?? null);
 
   useEffect(() => {
     if (!workflow) return;
@@ -136,7 +142,7 @@ export default function WorkflowGraph({ workflow }: { workflow: WorkflowRun }) {
 
   const onNodeClick = (event: React.MouseEvent, node: Node) => {
     const task = workflow.tasks.find(t => t.task_id === node.id);
-    if (task) setSelectedTask(task);
+    if (task) selectTask(task);
   };
 
   return (
@@ -151,7 +157,7 @@ export default function WorkflowGraph({ workflow }: { workflow: WorkflowRun }) {
           onNodeClick={onNodeClick}
           fitView
           attributionPosition="bottom-right"
-          colorMode="light"
+          colorMode={typeof document !== "undefined" && document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light"}
         >
           <Background gap={16} />
           <Controls style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-primary)', fill: 'var(--text-primary)' }} />
@@ -171,7 +177,7 @@ export default function WorkflowGraph({ workflow }: { workflow: WorkflowRun }) {
         }}>
           <div style={{ padding: '20px', borderBottom: '1px solid var(--border-primary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-secondary)' }}>
             <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>Execution Details</h3>
-            <button onClick={() => setSelectedTask(null)} className="btn btn-ghost btn-sm" style={{ padding: 4 }}>
+            <button onClick={() => selectTask(null)} className="btn btn-ghost btn-sm" style={{ padding: 4 }}>
               ✕
             </button>
           </div>

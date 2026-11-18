@@ -26,6 +26,9 @@ class ToolRegistryManager:
         auth: Optional[Dict[str, Any]] = None,
         is_enabled: bool = False,
         mcp_id: Optional[str] = None,
+        spec_provenance: str = "unknown",
+        test_coverage: Optional[Dict[str, Any]] = None,
+        capabilities_omitted: int = 0,
     ) -> str:
         mcp_id = mcp_id or str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -56,7 +59,21 @@ class ToolRegistryManager:
             "trust_tier": trust_tier,
             "source_type": source_type,
             "spec_json": spec_json,
+            "spec_provenance": spec_provenance,
+            "test_coverage": test_coverage or {},
+            "capabilities_omitted": capabilities_omitted,
+            # Audit G03: the factory's product is the declarative adapter.
+            # Standalone servers are an explicit export action, never the
+            # default build output.
+            "artifact_type": "adapter",
         })
         await self.mcp_repo.cache_tools(mcp_id, tools_payload)
+        if callable(getattr(self.mcp_repo, "save_revision", None)):
+            from backend.services.connector_revisions import checkpoint
+            try:
+                await checkpoint(self.mcp_repo, mcp_id)
+            except Exception:
+                await self.mcp_repo.set_mcp_enabled(mcp_id, False)
+                raise
         logger.info("Registered MCP %s (%s) with %s tools", mcp_id, name, len(tools_payload))
         return mcp_id

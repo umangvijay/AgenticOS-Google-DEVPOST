@@ -26,9 +26,18 @@ class FirestoreMCPRepository(BaseMCPRepository):
         if not mcp_id:
             raise ValueError("MCP manifest must have 'mcp_id'")
         payload.setdefault("updated_at", datetime.now(timezone.utc).isoformat())
-        payload.setdefault("is_enabled", payload.get("is_enabled", True))
+        payload.setdefault("is_enabled", False)
         db = await self._get_db()
-        await db.collection("mcps").document(mcp_id).set(payload)
+        from google.cloud import firestore
+        ref = db.collection("mcps").document(mcp_id)
+
+        @firestore.async_transactional
+        async def register(transaction):
+            previous = (await ref.get(transaction=transaction)).to_dict()
+            if previous is not None and previous.get("owner") != payload.get("owner"):
+                raise PermissionError("Connector belongs to another owner")
+            transaction.set(ref, payload, merge=True)
+        await register(db.transaction())
 
     async def get_mcp(self, mcp_id: str) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
@@ -43,7 +52,7 @@ class FirestoreMCPRepository(BaseMCPRepository):
         async for doc in db.collection("mcps").stream():
             data = doc.to_dict() or {}
             owner = data.get("owner")
-            if user_id and owner not in (user_id, "system", None):
+            if user_id and owner not in (user_id, "system"):
                 continue
             mcps.append(data)
         return mcps
@@ -61,13 +70,33 @@ class FirestoreMCPRepository(BaseMCPRepository):
 
     async def set_mcp_enabled(self, mcp_id: str, enabled: bool) -> None:
         db = await self._get_db()
+        from google.cloud import firestore
         await db.collection("mcps").document(mcp_id).update(
             {
                 "is_enabled": bool(enabled),
                 "is_active": bool(enabled),
+                "metadata.pending_publication_token": firestore.DELETE_FIELD,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
         )
+
+    async def publish_managed_candidate(self, mcp_id, *, owner, revision_id, publication_token, metadata):
+        from google.cloud import firestore
+        db = await self._get_db()
+        ref = db.collection("mcps").document(mcp_id)
+
+        @firestore.async_transactional
+        async def publish(transaction):
+            current = (await ref.get(transaction=transaction)).to_dict()
+            if (not current or current.get("owner") != owner
+                    or current.get("active_revision_id") != revision_id
+                    or current.get("is_enabled")
+                    or (current.get("metadata") or {}).get("pending_publication_token") != publication_token):
+                return False
+            transaction.update(ref, {"is_enabled": True, "is_active": True, "trust_tier": "verified",
+                                     "metadata": metadata, "updated_at": datetime.now(timezone.utc).isoformat()})
+            return True
+        return await publish(db.transaction())
 
     async def update_mcp_state(self, mcp_id: str, state: str) -> None:
         db = await self._get_db()
@@ -93,6 +122,8 @@ class FirestoreMCPRepository(BaseMCPRepository):
         snap = await ref.get()
         if not snap.exists:
             return False
+        async for revision in ref.collection("revisions").stream():
+            await revision.reference.delete()
         await ref.delete()
         async for doc in db.collection("mcp_tools").where("mcp_id", "==", mcp_id).stream():
             await doc.reference.delete()
@@ -160,3 +191,57 @@ class FirestoreMCPRepository(BaseMCPRepository):
         if doc.exists:
             return doc.to_dict() or {}
         return None
+
+    async def save_revision(self, mcp_id: str, revision: dict) -> None:
+        from google.api_core.exceptions import AlreadyExists
+        db = await self._get_db()
+        ref = db.collection("mcps").document(mcp_id).collection("revisions").document(revision["revision_id"])
+        try:
+            await ref.create(revision)
+        except AlreadyExists:
+            pass
+
+    async def list_revisions(self, mcp_id: str) -> list:
+        db = await self._get_db()
+        query = db.collection("mcps").document(mcp_id).collection("revisions").order_by("created_at", direction="DESCENDING").limit(100)
+        return [doc.to_dict() async for doc in query.stream()]
+
+    async def get_revision(self, mcp_id: str, revision_id: str):
+        db = await self._get_db()
+        doc = await db.collection("mcps").document(mcp_id).collection("revisions").document(revision_id).get()
+        return doc.to_dict() if doc.exists else None
+
+    async def save_validation_run(self, connector_id: str, run: dict) -> None:
+        db = await self._get_db()
+        await db.collection("mcps").document(connector_id).collection("validation_runs").document(
+            run["validation_run_id"]).set(run)
+
+    async def list_validation_runs(self, connector_id: str, limit: int = 100) -> list:
+        db = await self._get_db()
+        query = db.collection("mcps").document(connector_id).collection("validation_runs").order_by(
+            "started_at", direction="DESCENDING").limit(limit)
+        return [doc.to_dict() async for doc in query.stream()]
+
+    async def activate_revision_atomic(self, mcp_id, revision_id, expected, actor):
+        from google.cloud import firestore
+        from backend.services.connector_activation import ActivationConflictError
+        import uuid
+        db = await self._get_db()
+        ref = db.collection("mcps").document(mcp_id)
+        revision_ref = ref.collection("revisions").document(revision_id)
+        activation_ref = ref.collection("activations").document("act_" + uuid.uuid4().hex)
+
+        @firestore.async_transactional
+        async def activate(transaction):
+            current_doc = await ref.get(transaction=transaction)
+            revision_doc = await revision_ref.get(transaction=transaction)
+            if not current_doc.exists or not revision_doc.exists:
+                raise ValueError("Candidate revision not found for connector")
+            previous = (current_doc.to_dict() or {}).get("active_revision_id")
+            if expected is not None and (previous or "") != expected:
+                raise ActivationConflictError("Active revision changed")
+            transaction.update(ref, {"active_revision_id": revision_id})
+            transaction.create(activation_ref, {"revision_id": revision_id, "previous_revision_id": previous,
+                                                "actor": actor, "created_at": datetime.now(timezone.utc).isoformat()})
+            return {"activated": True, "revision_id": revision_id, "previous_revision_id": previous}
+        return await activate(db.transaction())

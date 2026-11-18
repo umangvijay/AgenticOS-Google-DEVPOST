@@ -32,6 +32,10 @@ class TaskStatus(str):
     WAITING_APPROVAL = "WAITING_APPROVAL"
     RECOVERING = "RECOVERING"
     SKIPPED = "SKIPPED"
+    # §12.2/§12.3: verification said needs_review — execution finished but
+    # the outcome is NOT verified success. Terminal for the task; the run
+    # lands in NEEDS_REVIEW (never COMPLETED) until a reviewer decides.
+    NEEDS_REVIEW = "NEEDS_REVIEW"
 
 class ErrorType(str, Enum):
     SEMANTIC_ERROR = "SEMANTIC_ERROR"
@@ -54,6 +58,7 @@ class SemanticErrorReason(str, Enum):
 class TaskDefinition(GeminiCompatibleBaseModel):
     task_id: str = Field(description="Unique identifier for the task within the workflow")
     agent: str = Field(description="The agent to handle the task")
+    agent_id: Optional[str] = Field(None, description="Registered specialist agent ID, if selected")
     tool: Optional[str] = Field(None, description="The tool to execute, if any")
     input_data: Dict[str, Any] = Field(default_factory=dict, description="Input parameters")
     dependencies: List[str] = Field(default_factory=list, description="IDs of tasks that must complete first")
@@ -70,6 +75,7 @@ class Task(BaseModel):
     user_id: str = "default_user"
     agent: str
     tool: Optional[str] = None
+    title: Optional[str] = None
     status: str = TaskStatus.PENDING
     input_data: Dict[str, Any] = Field(default_factory=dict)
     output_data: Optional[Dict[str, Any]] = None
@@ -88,6 +94,18 @@ class Task(BaseModel):
     recovery_enabled: bool = True
     max_recoveries: int = 3
     max_total_attempts: int = 5
+
+    # Phase 10 §10.7: acceptance criteria contract — the model may propose
+    # these, but the application validates that they cover the user's
+    # requested outcomes and do not weaken mandatory requirements.
+    acceptance_criteria: List[Dict[str, Any]] = Field(default_factory=list,
+        description="Structured acceptance criteria: [{kind, value, description}]")
+    requested_outcomes: List[str] = Field(default_factory=list,
+        description="What the user asked for (drives criteria validation)")
+    allowed_action_scope: List[str] = Field(default_factory=list,
+        description="Tool/operation types this task may use")
+    completion_policy: str = Field("criteria",
+        description="criteria (verify against acceptance_criteria) | external_effect (verify via effect ledger) | observational (verified observation suffices)")
     recovery_attempts: int = 0
     original_input: Optional[Dict[str, Any]] = None
     recovery_history: List[Dict[str, Any]] = Field(default_factory=list)
@@ -103,9 +121,12 @@ class WorkflowRun(BaseModel):
     goal: str
     status: str = TaskStatus.PENDING
     tasks: List[Task] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     parent_run_id: Optional[str] = None
     thread_id: Optional[str] = None
+    # Explicit organization ownership (audit F01). None = personal run;
+    # membership alone never makes a run organization-owned.
+    org_id: Optional[str] = None
 
 class IntentSchema(GeminiCompatibleBaseModel):
     action: str = Field(description="The core action the user wants to perform")
@@ -139,6 +160,9 @@ class WorkflowEventType(str, Enum):
     APPROVAL_REJECTED = "APPROVAL_REJECTED"
     TOOL_INVOKED = "TOOL_INVOKED"
     TOOL_COMPLETED = "TOOL_COMPLETED"
+    # §12.2: honest verification outcomes travel as events too.
+    TASK_NEEDS_REVIEW = "TASK_NEEDS_REVIEW"
+    WORKFLOW_NEEDS_REVIEW = "WORKFLOW_NEEDS_REVIEW"
 
 class WorkflowEvent(BaseModel):
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))

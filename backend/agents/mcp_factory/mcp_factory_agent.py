@@ -27,6 +27,32 @@ from backend.services.gemini_client import GeminiQuotaExceeded, is_quota_error
 logger = logging.getLogger(__name__)
 
 
+def auth_metadata_from_spec(model, fallback_type: str = "API_KEY") -> Dict[str, str]:
+    """Derive credential placement from the spec's securitySchemes so the
+    executor sends the secret where the API actually reads it
+    (e.g. X-API-Key header vs Authorization: Bearer vs ?api_key=)."""
+    schemes = getattr(model, "security_schemes", None) or {}
+    if not schemes and not any(op.security_requirements for op in getattr(model, "operations", [])):
+        return {"type": "NONE"}
+    for scheme in (schemes or {}).values():
+        if not isinstance(scheme, dict):
+            continue
+        stype = str(scheme.get("type") or "").lower()
+        if stype == "http" and str(scheme.get("scheme") or "").lower() == "bearer":
+            return {"type": "BEARER"}
+        if stype == "http" and str(scheme.get("scheme") or "").lower() == "basic":
+            return {"type": "BASIC"}
+        if stype == "apikey" or stype == "apiKey":
+            location = str(scheme.get("in") or "header").lower()
+            name = str(scheme.get("name") or "").strip()
+            if location == "query" and name:
+                return {"type": "API_KEY", "in": "query", "name": name}
+            if name:
+                return {"type": "API_KEY", "in": "header", "name": name}
+            return {"type": "API_KEY", "in": "header"}
+    return {"type": str(fallback_type or "API_KEY").upper()}
+
+
 class MCPFactoryAgent:
     def __init__(self, mcp_repo, secrets_repo=None):
         self.mcp_repo = mcp_repo
@@ -51,12 +77,17 @@ class MCPFactoryAgent:
         name: str = "",
         build_id: Optional[str] = None,
         auth_type: str = "API_KEY",
+        intent: str = "",
     ) -> Dict[str, Any]:
         logs: list = []
         try:
             if build_id:
                 await self.mcp_repo.update_build(build_id, {"status": "running", "stage": "fetching"})
             await self._log(build_id, "Starting MCP factory", logs)
+            if method == "python_tools":
+                from backend.services.standalone_build import build_compute_connector
+                return await build_compute_connector(self.mcp_repo, user_id=user_id,
+                    source=source, name=name, build_id=build_id)
             if method == "website" or (
                 method in ("prompt", "url")
                 and looks_like_website_without_api(source, url=source if str(source).startswith("http") else None)
@@ -73,17 +104,80 @@ class MCPFactoryAgent:
                     if op.servers:
                         model.servers = list(op.servers)
                         break
-            if not model.servers:
-                raise ValueError("OpenAPI spec has no HTTPS servers")
+            # Relative server URLs must be resolved against the spec's own URL
+            # BEFORE deciding the spec is unusable — "/api/v3" alone is common.
             self._resolve_relative_servers(model, source_uri)
+            if not model.servers:
+                raise ValueError(
+                    "OpenAPI spec has no usable HTTPS server URLs. If it uses relative "
+                    "server URLs, build from the spec's URL (or paste the spec) so they can be resolved."
+                )
+            # §29.14: the intake record reaches its RETRIEVED stage as soon
+            # as the interface is documented — what the spec actually
+            # declares, before any generation runs.
+            if build_id:
+                try:
+                    from backend.services.app_intake import (
+                        finalize_intake_record, documented_operations_from_model,
+                        authentication_requirements_from_auth,
+                    )
+                    _stored = await self.mcp_repo.get_build(build_id)
+                    _intake = dict((_stored or {}).get("intake") or {})
+                    if _intake:
+                        _spec_digest = hashlib.sha256(
+                            json.dumps(self.parser.raw_spec, sort_keys=True,
+                                       separators=(",", ":")).encode("utf-8")
+                        ).hexdigest()
+                        _finalized = finalize_intake_record(
+                            _intake, source_uri=source_uri,
+                            spec_digest=_spec_digest,
+                            documented_operations=documented_operations_from_model(model),
+                            authentication_requirements=authentication_requirements_from_auth(
+                                getattr(model, "auth", None)
+                                or (getattr(model, "info", {}) or {}).get("auth") or {}),
+                            unresolved_assumptions=[
+                                "relative server URLs were resolved against the "
+                                "spec source" if source_uri else
+                                "no retrieval source URI recorded",
+                            ])
+                        await self.mcp_repo.update_build(
+                            build_id, {"intake": _finalized})
+                except Exception:
+                    await self._log(build_id, "Intake record finalization skipped", logs)
 
-            spec_hash = hashlib.sha256(spec_text.encode("utf-8")).hexdigest()
+            spec_hash = hashlib.sha256(json.dumps(self.parser.raw_spec, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
             spec_version = str(model.info.get("version") or "1.0.0")
             display_name = name or model.info.get("title") or "Custom Integration"
             mcp_id = hashlib.sha256(f"{user_id}:{spec_hash}".encode("utf-8")).hexdigest()[:16]
 
-            await self._log(build_id, f"Generating tool schemas ({min(len(model.operations), 80)} ops)", logs)
-            tools = self.schema_gen.generate(model, mcp_id, spec_version)
+            existing = await self.mcp_repo.get_mcp(mcp_id)
+            if existing and existing.get("owner") == user_id and existing.get("is_enabled"):
+                cached = await self.mcp_repo.get_cached_tools(mcp_id)
+                if cached:
+                    if intent:
+                        selected = self.schema_gen.generate(model, mcp_id, spec_version, intent=intent)
+                        combined = {t["tool_name"]: t for t in cached}
+                        for selected_tool in selected:
+                            combined.setdefault(selected_tool.tool_name, selected_tool.model_dump(mode="json"))
+                        cached = list(combined.values())
+                        await self.mcp_repo.cache_tools(mcp_id, cached)
+                    summaries = [{"name": t.get("tool_name"), "description": t.get("description", "")} for t in cached]
+                    await self._log(build_id, "Reusing the registered specification and credentials", logs)
+                    if build_id:
+                        await self.mcp_repo.update_build(build_id, {"status": "success", "stage": "reused", "mcp_id": mcp_id, "tools": summaries, "logs": logs})
+                    return {"status": "success", "reused": True, "mcp_id": mcp_id, "tools": summaries,
+                            "message": f"Reusing {existing.get('name') or display_name}", "name": existing.get("name") or display_name}
+
+            # Spec provenance (audit G06; Phase 6 §6.4): where the operation
+            # definitions came from determines the trust ceiling — an inferred
+            # sketch can never earn the verified tier, whatever a probe says.
+            # Unknown import methods default to `unknown`, never official_spec.
+            from backend.services.tool_validation import spec_source_provenance
+            spec_provenance = spec_source_provenance(method)
+            total_operations = len(model.operations)
+            await self._log(build_id, f"Generating tool schemas ({min(total_operations, 30)} ops)", logs)
+            tools = self.schema_gen.generate(model, mcp_id, spec_version, intent=intent,
+                                             spec_provenance=spec_provenance)
             if not tools:
                 raise ValueError("Schema generator produced no tools")
 
@@ -92,12 +186,111 @@ class MCPFactoryAgent:
                 if not t.operation or not (t.operation.get("servers") or t.operation.get("path")):
                     raise ValueError(f"Tool {t.tool_name} is missing operation metadata")
 
+            auth_meta = auth_metadata_from_spec(model, fallback_type=auth_type)
+            # §29.14/§29.15 revision: the persisted Forge record — the
+            # product identity of this build (resolved URI, raw vs
+            # normalized digests, kind, per-operation definition digests).
+            if build_id:
+                try:
+                    from backend.services.app_intake import (
+                        forge_record, operations_forged, NORMALIZER_VERSION,
+                    )
+                    _tools_json = [t.model_dump(mode="json") for t in tools]
+                    await self.mcp_repo.update_build(build_id, {
+                        "intake": {**(await self.mcp_repo.get_build(build_id))
+                                   .get("intake", {}),
+                                   "forge": forge_record(
+                                       kind="openapi_adapter", method=method,
+                                       source_uri=source_uri,
+                                       raw_digest=hashlib.sha256(
+                                           (spec_text or "").encode("utf-8")
+                                       ).hexdigest(),
+                                       effective_spec_digest=spec_hash,
+                                       normalizer_version=NORMALIZER_VERSION,
+                                       operations=operations_forged(
+                                           _tools_json, spec_hash),
+                                       spec_provenance=spec_provenance.value
+                                       if hasattr(spec_provenance, "value")
+                                       else str(spec_provenance))}})
+                except Exception:
+                    await self._log(build_id, "Forge record persistence skipped", logs)
+            from backend.services.tool_validation import credential_binding_id_from
+            probe_binding = credential_binding_id_from({"type": "NONE"})
+            probed_tool = None
             await self._log(build_id, "Running live sandbox probe", logs)
-            probe = await self._probe(tools[0].model_dump(mode="json"), model)
+            probe = {"status": "skipped", "reason": "No read-only tool with complete probe inputs"}
+            for candidate in tools:
+                if (candidate.operation or {}).get("http_method") == "GET" and not candidate.input_schema.get("required"):
+                    probe = await self._probe(candidate.model_dump(mode="json"), model)
+                    if probe.get("ok") is True:
+                        from backend.services.tool_validation import record_read_probe
+                        candidate.operation = record_read_probe(candidate.model_dump(mode="json"), spec_hash, probe_binding)["operation"]
+                        probed_tool = candidate
+                    break
             await self._log(build_id, f"Probe result: {probe.get('status', probe)}", logs)
 
-            trust_tier = "verified" if method in ("url", "spec", "openapi") else "pending_review"
-            auto_enable = True
+            # Self-healing codegen (audit §9): a crashed probe on a model-built
+            # spec means the generated integration is broken, not the API. Feed
+            # the error back once and rebuild before registering.
+            if probe.get("status") == "probe_error" and method == "prompt" and source_uri is None:
+                try:
+                    await self._log(build_id, "Probe crashed; regenerating the spec with the error fed back", logs)
+                    healed_source = (
+                        f"{source}\n\nThe previously generated integration crashed at runtime: "
+                        f"{str(probe.get('error'))[:400]}. Produce a simpler, correct OpenAPI 3 spec."
+                    )
+                    healed_spec = await self._spec_from_prompt(healed_source, logs, build_id)
+                    healed_model = self.parser.parse_text(healed_spec)
+                    if healed_model.operations:
+                        if not healed_model.servers:
+                            for op in healed_model.operations:
+                                if op.servers:
+                                    healed_model.servers = list(op.servers)
+                                    break
+                        self._resolve_relative_servers(healed_model, None)
+                        if healed_model.servers:
+                            healed_hash = hashlib.sha256(json.dumps(self.parser.raw_spec, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+                            model = healed_model
+                            spec_hash = healed_hash
+                            spec_version = str(model.info.get("version") or "1.0.0")
+                            mcp_id = hashlib.sha256(f"{user_id}:{spec_hash}".encode("utf-8")).hexdigest()[:16]
+                            tools = self.schema_gen.generate(model, mcp_id, spec_version, intent=intent,
+                                                             spec_provenance=spec_provenance)
+                            probe = {"status": "skipped", "reason": "regenerated spec"}
+                            for candidate in tools:
+                                if (candidate.operation or {}).get("http_method") == "GET" and not candidate.input_schema.get("required"):
+                                    probe = await self._probe(candidate.model_dump(mode="json"), model)
+                                    break
+                            await self._log(build_id, f"Rebuilt spec; probe result: {probe.get('status', probe)}", logs)
+                except Exception as heal_exc:
+                    await self._log(build_id, f"Self-heal regeneration failed ({heal_exc}); registering the original build", logs)
+
+            trust_tier = "verified" if method in ("url", "spec", "openapi") and probe.get("ok") is True else "pending_review"
+            # A registered definition is not executable until its operation evidence passes policy.
+            auto_enable = trust_tier == "verified" and credential_binding_id_from(auth_meta) == probe_binding
+
+            # Prefer the spec's own security scheme placement; fall back to the requested auth_type.
+            auth_meta = auth_metadata_from_spec(model, fallback_type=auth_type)
+
+            # Per-operation test coverage (audit G02 / v5.6 A9; Phase 6 §6.7/
+            # §6.12): digest-verified against this revision's spec hash and
+            # bound to the credential CONTEXT (ref+version+epoch), not the
+            # raw ref. No credential context → historical coverage only.
+            from backend.services.tool_validation import (
+                coverage_from_tools, credential_binding_id_from,
+            )
+            test_coverage = coverage_from_tools(
+                tools, spec_hash=spec_hash,
+                credential_binding_id=credential_binding_id_from(auth_meta),
+            )
+            capabilities_omitted = max(0, total_operations - len(tools))
+            await self._log(
+                build_id,
+                f"Coverage: {test_coverage['read_probe_passed']}/{test_coverage['total']} operations "
+                f"probe-tested ({test_coverage['mutating_untested']} untested writes); "
+                f"provenance={spec_provenance}; {capabilities_omitted} capability(ies) not selected",
+                logs,
+            )
 
             await self._log(build_id, "Registering MCP in the catalog", logs)
             mcp_id = await self.registry.register_mcp(
@@ -111,17 +304,55 @@ class MCPFactoryAgent:
                 spec_json=spec_text,
                 spec_hash=spec_hash,
                 spec_version=spec_version,
-                auth={"type": auth_type},
+                auth=auth_meta,
                 is_enabled=auto_enable,
                 mcp_id=mcp_id,
+                spec_provenance=spec_provenance,
+                test_coverage=test_coverage,
+                capabilities_omitted=capabilities_omitted,
             )
+
+            if auto_enable and probed_tool is not None:
+                from backend.services.connector_build_validation import persist_build_probe
+                _parent_run = None
+                try:
+                    if build_id:
+                        _build_record = await self.mcp_repo.get_build(build_id)
+                        _parent_run = (_build_record or {}).get("parent_run_id")
+                except Exception:
+                    _parent_run = None
+                await persist_build_probe(self.mcp_repo, mcp_id,
+                                          probed_tool.model_dump(mode="json"),
+                                          probe, owner_user_id=user_id,
+                                          parent_run_id=_parent_run)
 
             tool_summaries = [{"name": t.tool_name, "description": t.description} for t in tools]
             names = ", ".join(t["name"] for t in tool_summaries[:16] if t.get("name"))
+            needs_auth = str(auth_meta.get("type") or "").upper() not in ("", "NONE")
+            auth_hint = (
+                "\nThis API authenticates"
+                + (f" via {auth_meta.get('name') or 'Authorization'}"
+                   + (" query parameter" if auth_meta.get("in") == "query" else " header")
+                   if auth_meta.get("name") else " with a Bearer token")
+                + ". Attach its API key on the integration page (or Vault) before calling tools."
+                if needs_auth else ""
+            )
+            probe_warning = ""
+            if probe.get("status") in ("probe_error",) or probe.get("ok") is False:
+                probe_warning = f"\nLive probe did not succeed ({probe.get('http_status') or probe.get('error') or 'error'}) — verify the API is reachable and the spec's server URL is correct."
+            gate_warning = ""
+            if not auto_enable:
+                gate_warning = (
+                    "\nThe integration is registered DISABLED pending validation. "
+                    "Connect credentials, run validation, then enable the tested operations."
+                )
             msg = (
                 f"Built {display_name} with {len(tools)} tool{'s' if len(tools) != 1 else ''}"
                 + (f": {names}." if names else ".")
-                + f"\nmcp_id: {mcp_id}. Store the API key in Vault to call these tools live."
+                + f"\nmcp_id: {mcp_id}."
+                + auth_hint
+                + probe_warning
+                + gate_warning
             )
             result = {
                 "status": "success",
@@ -131,6 +362,9 @@ class MCPFactoryAgent:
                 "name": display_name,
                 "tools": tool_summaries,
                 "trust_tier": trust_tier,
+                "total_operations": len(model.operations),
+                "selected_operations": len(tools),
+                "selection_method": "keyword_relevance" if intent else "specification_order",
             }
             if build_id:
                 await self.mcp_repo.update_build(build_id, {
@@ -230,13 +464,20 @@ class MCPFactoryAgent:
     def _resolve_relative_servers(model, source_uri: Optional[str]) -> None:
         """OpenAPI allows relative server URLs; resolve them against the spec's own URL."""
         from urllib.parse import urljoin
+        from backend.mcp.builder.openapi_parser import OpenAPIParser
+
+        ssrf = OpenAPIParser()._validate_ssrf
 
         def fix(servers):
             for server in servers:
                 if server.url.startswith(("http://", "https://")):
                     continue
                 if source_uri:
-                    server.url = urljoin(source_uri, server.url)
+                    resolved = urljoin(source_uri, server.url)
+                    # A scheme-relative or crafty relative URL must not escape
+                    # the spec's own origin — validate like any absolute URL.
+                    ssrf(resolved)
+                    server.url = resolved
                 else:
                     raise ValueError(
                         f"Spec uses relative server URL '{server.url}' but no source URL is known"
@@ -247,14 +488,33 @@ class MCPFactoryAgent:
             fix(op.servers)
 
     async def _fetch_text(self, url: str) -> str:
-        self.parser._validate_ssrf(url)
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            content = response.text
-        if len(content) > 400_000:
-            content = content[:400_000]
-        return content
+        import asyncio
+        headers = {"User-Agent": "AgentOS/1.0 (+OpenAPI integration builder)",
+                   "Accept": "application/json, application/yaml, text/yaml, text/html;q=0.8"}
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False, headers=headers) as client:
+            for _ in range(6):
+                self.parser._validate_ssrf(url)
+                for attempt in range(3):
+                    async with client.stream("GET", url) as response:
+                        if response.status_code in (429, 502, 503, 504) and attempt < 2:
+                            await asyncio.sleep(0.5 * (2 ** attempt))
+                            continue
+                        if response.status_code in (301, 302, 303, 307, 308):
+                            location = response.headers.get("location")
+                            if not location:
+                                raise ValueError("Documentation redirect has no destination")
+                            url = urljoin(url, location)
+                            break
+                        response.raise_for_status()
+                        chunks = []
+                        size = 0
+                        async for chunk in response.aiter_bytes():
+                            size += len(chunk)
+                            if size > 20 * 1024 * 1024:
+                                raise ValueError("Specification exceeds the 20 MB limit")
+                            chunks.append(chunk)
+                        return b"".join(chunks).decode("utf-8-sig")
+            raise ValueError("Too many documentation redirects")
 
     def _parse_or_none(self, content: str):
         try:
@@ -351,7 +611,7 @@ class MCPFactoryAgent:
                 return sketched, None
             if last_error and (isinstance(last_error, GeminiQuotaExceeded) or is_quota_error(last_error)):
                 raise ValueError(
-                    "The model could not build this MCP (quota). Add a Gemini key in Settings, "
+                    "The model could not build this MCP (quota). Configure a supported LLM provider in Settings, "
                     "or paste an OpenAPI URL."
                 ) from last_error
             raise ValueError(

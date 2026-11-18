@@ -4,6 +4,7 @@ import { GoogleOAuthProvider } from "@react-oauth/google";
 import { AuthProvider } from "@/lib/auth-context";
 import { NetworkStatusProvider } from "@/hooks/NetworkStatusProvider";
 import { ReactNode } from "react";
+import ScrollRevealObserver from "@/components/ScrollRevealObserver";
 
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
 const GOOGLE_ENABLED = Boolean(GOOGLE_CLIENT_ID) && GOOGLE_CLIENT_ID !== "dummy-client-id";
@@ -12,6 +13,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
   const tree = (
     <AuthProvider>
       <NetworkStatusProvider />
+      <ScrollRevealObserver />
       {children}
     </AuthProvider>
   );

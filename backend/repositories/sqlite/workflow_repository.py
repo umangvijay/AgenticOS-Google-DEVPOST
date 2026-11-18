@@ -31,8 +31,8 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
         # Upsert the run
         await conn.execute(
             """
-            INSERT INTO workflow_runs (run_id, workflow_id, user_id, goal, status, created_at, updated_at, parent_run_id, thread_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO workflow_runs (run_id, workflow_id, user_id, goal, status, created_at, updated_at, parent_run_id, thread_id, org_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id) DO UPDATE SET
                 status = excluded.status,
                 updated_at = excluded.updated_at
@@ -47,6 +47,7 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
                 now,
                 run_data.get("parent_run_id"),
                 run_data.get("thread_id") or run_data["run_id"],
+                run_data.get("org_id"),
             ),
         )
 
@@ -72,6 +73,25 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
         result["tasks"] = [self._task_row_to_dict(t) for t in task_rows]
         return result
 
+
+    async def _attach_tasks(self, runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Attach tasks to many runs with ONE query instead of one per run
+        (list_runs previously issued N+1 queries — measurable at limit=200)."""
+        if not runs:
+            return runs
+        ids = [r["run_id"] for r in runs]
+        placeholders = ",".join("?" for _ in ids)
+        rows = await self.db.fetch_all(
+            f"SELECT * FROM tasks WHERE run_id IN ({placeholders}) ORDER BY rowid",
+            tuple(ids),
+        )
+        by_run: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            by_run.setdefault(row["run_id"], []).append(self._task_row_to_dict(row))
+        for r in runs:
+            r["tasks"] = by_run.get(r["run_id"], [])
+        return runs
+
     async def list_runs(self, user_id: str, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         rows = await self.db.fetch_all(
             """
@@ -82,16 +102,7 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
             """,
             (user_id, limit, offset),
         )
-        runs = []
-        for row in rows:
-            run = dict(row)
-            task_rows = await self.db.fetch_all(
-                "SELECT * FROM tasks WHERE run_id = ? ORDER BY rowid",
-                (run["run_id"],),
-            )
-            run["tasks"] = [self._task_row_to_dict(t) for t in task_rows]
-            runs.append(run)
-        return runs
+        return await self._attach_tasks([dict(row) for row in rows])
 
     async def list_thread_runs(self, user_id: str, thread_id: str) -> List[Dict[str, Any]]:
         rows = await self.db.fetch_all(
@@ -102,16 +113,7 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
             """,
             (user_id, thread_id, thread_id, thread_id),
         )
-        runs = []
-        for row in rows:
-            run = dict(row)
-            task_rows = await self.db.fetch_all(
-                "SELECT * FROM tasks WHERE run_id = ? ORDER BY rowid",
-                (run["run_id"],),
-            )
-            run["tasks"] = [self._task_row_to_dict(t) for t in task_rows]
-            runs.append(run)
-        return runs
+        return await self._attach_tasks([dict(row) for row in rows])
 
     async def update_run_status(self, run_id: str, status: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -123,26 +125,31 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
 
     async def create_if_absent(self, run_data: Dict[str, Any]) -> bool:
         """Idempotent creation. Returns True if created, False if already exists."""
+        import aiosqlite
         now = datetime.now(timezone.utc).isoformat()
-        conn = await self.db.connection()
-        cursor = await conn.execute(
-            """
-            INSERT OR IGNORE INTO workflow_runs
-                (run_id, workflow_id, user_id, goal, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                run_data["run_id"],
-                run_data.get("workflow_id", "default_workflow"),
-                run_data.get("user_id", "default_user"),
-                run_data["goal"],
-                run_data.get("status", "PENDING"),
-                run_data.get("created_at", now),
-                now,
-            ),
-        )
-        await conn.commit()
-        return cursor.rowcount > 0
+        # Dedicated connection prevents unrelated coroutines committing this transaction.
+        async with aiosqlite.connect(self.db.db_path, timeout=30) as conn:
+            await conn.execute("PRAGMA foreign_keys=ON")
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await conn.execute(
+                    """INSERT OR IGNORE INTO workflow_runs
+                    (run_id, workflow_id, user_id, goal, status, created_at, updated_at, parent_run_id, thread_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (run_data["run_id"], run_data.get("workflow_id", "default_workflow"),
+                     run_data.get("user_id", "default_user"), run_data["goal"],
+                     run_data.get("status", "PENDING"), run_data.get("created_at", now), now,
+                     run_data.get("parent_run_id"), run_data.get("thread_id") or run_data["run_id"]),
+                )
+                created = cursor.rowcount > 0
+                if created:
+                    for task in run_data.get("tasks", []):
+                        await self._upsert_task(conn, run_data["run_id"], task)
+                await conn.commit()
+                return created
+            except BaseException:
+                await conn.rollback()
+                raise
 
     # ── Tasks ─────────────────────────────────────────────────────
 
@@ -157,6 +164,77 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
             (run_id, task_id),
         )
         return self._task_row_to_dict(row) if row else None
+
+    async def cancel_run(self, run_id: str, by: str = "",
+                         reason: str = "") -> bool:
+        """C6 (§4.15): run-level cancellation intent, idempotent — only
+        RUNNING/PENDING runs cancel; PENDING tasks are cancelled with it so
+        no descendant work is dispatched afterwards."""
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = await self.db.execute(
+            "UPDATE workflow_runs SET status='CANCELLED', updated_at=? "
+            "WHERE run_id=? AND status IN ('RUNNING','PENDING')",
+            (now, run_id))
+        if cursor.rowcount:
+            await self.db.execute(
+                "UPDATE tasks SET status='CANCELLED', completed_at=? "
+                "WHERE run_id=? AND status IN ('PENDING','WAITING')",
+                (now, run_id))
+        await self.db.commit()
+        return bool(cursor.rowcount)
+
+    async def update_task_if_not_cancelled(self, run_id: str, task_id: str,
+                                           updates: Dict[str, Any], *, expected_attempt=None) -> bool:
+        """§4.15 (C6): CONDITIONAL completion — a task whose run was
+        cancelled concurrently cannot be overwritten by a stale completion
+        (the check-then-write race is closed inside one statement)."""
+        if not updates:
+            return True
+        set_clauses = []
+        values = []
+        for key, value in updates.items():
+            set_clauses.append(f"{key} = ?")
+            values.append(value)
+        values.extend([run_id, task_id])
+        guard = ""
+        if expected_attempt is not None:
+            guard = " AND attempt=? AND status='RUNNING' AND datetime(lease_expires_at)>datetime('now')"
+            values.append(expected_attempt)
+        # dict/list values are JSON columns — serialize before binding.
+        values = [json.dumps(v) if isinstance(v, (dict, list)) else v for v in values]
+        cursor = await self.db.execute(
+            f"UPDATE tasks SET {', '.join(set_clauses)} "
+            "WHERE run_id=? AND task_id=? AND status != 'CANCELLED' "
+            "AND EXISTS(SELECT 1 FROM workflow_runs r WHERE r.run_id=tasks.run_id AND r.status!='CANCELLED')"
+            + guard,
+            values)
+        await self.db.commit()
+        return cursor.rowcount > 0
+
+    async def update_task_deferral(self, run_id: str, task_id: str,
+                                   next_attempt_at: str, defer_count: int) -> None:
+        """Phase 4 §4.11 (C9): persist the deferral on the COLUMN the
+        reconciler queries — not inside input_data."""
+        await self.db.execute(
+            "UPDATE tasks SET next_attempt_at=?, defer_count=? "
+            "WHERE run_id=? AND task_id=?",
+            (next_attempt_at, int(defer_count), run_id, task_id))
+        await self.db.commit()
+
+    async def find_due_deferred_tasks(self, now_iso: str, limit: int = 50):
+        """Phase 4 §4.11: tasks whose persisted wait has elapsed and which
+        have NOT yet been claimed — PENDING deferrals and RETRYING tasks
+        whose durable retry timer (§32.6) elapsed without a fast-path
+        retrigger."""
+        cursor = await self.db.execute(
+            """
+            SELECT task_id, run_id, workflow_id FROM tasks
+            WHERE status IN ('PENDING','RETRYING')
+              AND next_attempt_at IS NOT NULL
+              AND next_attempt_at<=?
+            ORDER BY next_attempt_at LIMIT ?
+            """, (now_iso, limit))
+        return [dict(r) for r in await cursor.fetchall()]
 
     async def update_task(self, run_id: str, task_id: str, updates: Dict[str, Any]) -> None:
         if not updates:
@@ -176,11 +254,18 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
         values.extend([run_id, task_id])
 
         conn = await self.db.connection()
-        await conn.execute(
-            f"UPDATE tasks SET {', '.join(set_clauses)} WHERE run_id = ? AND task_id = ?",
+        fence = ""
+        if "attempt" in updates:
+            fence = " AND attempt = ?"
+            values.append(updates["attempt"])
+        cursor = await conn.execute(
+            f"UPDATE tasks SET {', '.join(set_clauses)} WHERE run_id = ? AND task_id = ?{fence}",
             tuple(values),
         )
         await conn.commit()
+        if fence and cursor.rowcount == 0:
+            from backend.models.exceptions import StaleTaskLeaseError
+            raise StaleTaskLeaseError(f"Task {task_id} no longer belongs to this execution")
 
     async def claim_task(self, run_id: str, task_id: str, lease_seconds: int) -> bool:
         """
@@ -351,13 +436,15 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
         await conn.execute(
             """
             INSERT INTO tasks (
-                task_id, run_id, workflow_id, user_id, agent, tool, status,
+                task_id, run_id, workflow_id, user_id, agent, tool, title, status,
                 input_data, output_data, dependencies, started_at, completed_at,
                 lease_started_at, lease_expires_at, attempt, timeout_seconds,
                 max_retries, recovery_enabled, max_recoveries, max_total_attempts,
                 recovery_attempts, original_input, recovery_history,
-                error, error_type, trace_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                error, error_type, trace_id,
+                acceptance_criteria_json, requested_outcomes_json,
+                allowed_action_scope_json, completion_policy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id, task_id) DO UPDATE SET
                 status = excluded.status,
                 input_data = excluded.input_data,
@@ -371,7 +458,11 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
                 recovery_history = excluded.recovery_history,
                 error = excluded.error,
                 error_type = excluded.error_type,
-                trace_id = excluded.trace_id
+                trace_id = excluded.trace_id,
+                acceptance_criteria_json = excluded.acceptance_criteria_json,
+                requested_outcomes_json = excluded.requested_outcomes_json,
+                allowed_action_scope_json = excluded.allowed_action_scope_json,
+                completion_policy = excluded.completion_policy
             """,
             (
                 task["task_id"],
@@ -380,6 +471,7 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
                 task.get("user_id", "default_user"),
                 task["agent"],
                 task.get("tool"),
+                task.get("title"),
                 task.get("status", "PENDING"),
                 json.dumps(task.get("input_data", {})),
                 json.dumps(task.get("output_data")) if task.get("output_data") else None,
@@ -400,6 +492,17 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
                 task.get("error"),
                 task.get("error_type"),
                 task.get("trace_id"),
+                # §10.7/§11.0: acceptance criteria survive persistence
+                json.dumps(task.get("acceptance_criteria", [])
+                           if not isinstance(task.get("acceptance_criteria"), str)
+                           else task.get("acceptance_criteria")),
+                json.dumps(task.get("requested_outcomes", [])
+                           if not isinstance(task.get("requested_outcomes"), str)
+                           else task.get("requested_outcomes")),
+                json.dumps(task.get("allowed_action_scope", [])
+                           if not isinstance(task.get("allowed_action_scope"), str)
+                           else task.get("allowed_action_scope")),
+                task.get("completion_policy", "criteria"),
             ),
         )
 
@@ -413,6 +516,21 @@ class SQLiteWorkflowRepository(BaseWorkflowRepository):
         result["output_data"] = json.loads(result["output_data"]) if result.get("output_data") else None
         result["dependencies"] = json.loads(result.get("dependencies", "[]"))
         result["recovery_history"] = json.loads(result.get("recovery_history", "[]"))
+        # §11.0 Finding 3: decode acceptance criteria for reload
+        for key in ("acceptance_criteria", "requested_outcomes",
+                    "allowed_action_scope"):
+            col = f"{key}_json"
+            raw = result.get(col)
+            result[key] = json.loads(raw) if raw else []
+        result["completion_policy"] = result.get("completion_policy", "criteria")
         result["original_input"] = json.loads(result["original_input"]) if result.get("original_input") else None
         result["recovery_enabled"] = bool(result.get("recovery_enabled", 0))
         return result
+
+    async def purge_old_events(self, days: int) -> int:
+        """Retention control: delete timeline events older than N days (runs kept)."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+        conn = await self.db.connection()
+        cursor = await conn.execute("DELETE FROM events WHERE timestamp < ?", (cutoff,))
+        await conn.commit()
+        return cursor.rowcount or 0

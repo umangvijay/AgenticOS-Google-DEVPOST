@@ -1,5 +1,12 @@
 # Repository Assessment
 
+> **Stale snapshot (greenfield-era).** The environment described below
+> (Python 3.9, no Node/Docker/gcloud) no longer resembles reality — see
+> `docs/production-readiness.md` and `VEYRUNE_AUDIT_REPORT.md` for the
+> current state. Kept only as a historical record.
+
+# Repository Assessment
+
 ## Current Environment Status
 This is a newly initialized (greenfield) project for AgentOS.
 
@@ -26,7 +33,7 @@ Since this is a fresh setup, the following required SDKs must be installed befor
 - Google ADK (Agent Development Kit) will be utilized as the core agent orchestration framework in Phase 1.
 
 ## Gemini Configuration
-- Expected Model: Gemini 3.x Flash and Gemini Embedding 2.
+- Expected Model: Gemini 3.8 Flash and `gemini-embedding-001`.
 
 ## Google Cloud Project & Authentication
 - Google Cloud project needs to be provisioned (can be handled via Terraform once installed).

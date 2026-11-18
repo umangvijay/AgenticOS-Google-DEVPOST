@@ -2,7 +2,13 @@
 
 import React, { useRef, useState } from "react";
 
-export default function TiltCard({ children, className, style }: any) {
+interface TiltCardProps extends React.HTMLAttributes<HTMLDivElement> {
+  children: React.ReactNode;
+  className?: string;
+  style?: React.CSSProperties;
+}
+
+export default function TiltCard({ children, className, style, ...rest }: TiltCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   const rectRef = useRef<DOMRect | null>(null);
   const [isHovered, setIsHovered] = useState(false);
@@ -41,6 +47,7 @@ export default function TiltCard({ children, className, style }: any) {
 
   return (
     <div 
+      {...rest}
       style={{
         transform: isHovered ? `${baseTransform} translateY(-12px)` : baseTransform,
         transition: "transform 0.5s cubic-bezier(0.4, 0, 0.2, 1)",
@@ -61,7 +68,7 @@ export default function TiltCard({ children, className, style }: any) {
           transition: isHovered 
             ? "transform 0.1s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.5s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.5s" 
             : "all 0.5s cubic-bezier(0.4, 0, 0.2, 1)",
-          boxShadow: isHovered ? "0 25px 50px rgba(236, 72, 153, 0.25)" : style?.boxShadow,
+          boxShadow: isHovered ? "0 25px 50px rgba(46, 86, 196, 0.22)" : style?.boxShadow,
           height: "100%",
           margin: 0
         }}

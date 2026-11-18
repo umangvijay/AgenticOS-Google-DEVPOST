@@ -2,6 +2,7 @@
 
 import { useState, FormEvent, useEffect } from "react";
 import PublicNavbar from "@/components/PublicNavbar";
+import SheetHeader from "@/components/SheetHeader";
 
 const TEAM_EMAIL = "godumang35@gmail.com";
 
@@ -56,26 +57,23 @@ export default function ContactPage() {
       <PublicNavbar />
 
       <main className="px-4 py-12 md:py-20 max-w-5xl mx-auto w-full flex-1">
-        <div className="text-center mb-16 animate-fade-in-up">
-          <p className="eyebrow">Contact</p>
-          <h1 className="text-4xl md:text-5xl lg:text-6xl font-extrabold mb-6 gradient-text">
-            Get in Touch
-          </h1>
-          <p className="text-lg md:text-xl text-[var(--text-secondary)] max-w-2xl mx-auto">
-            Have a question about AgentOS, or want to discuss enterprise deployments?
-            Messages go to <a href={`mailto:${TEAM_EMAIL}`} style={{ color: "var(--accent)" }}>{TEAM_EMAIL}</a>.
-          </p>
-        </div>
+        <SheetHeader
+          eyebrow="CORRESPONDENCE"
+          index="05"
+          title={<>Get in <em>touch.</em></>}
+          deck={<>Have a question about Sandtable, or want to discuss enterprise deployments?
+            Messages go to <a href={`mailto:${TEAM_EMAIL}`} style={{ color: "var(--accent)" }}>{TEAM_EMAIL}</a>.</>}
+        />
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-12 items-start">
-          <div className="glass-panel glass-lift p-6 md:p-10 border-t-4 border-[var(--accent-pink)] animate-fade-in-up">
+          <div data-scroll-reveal className="glass-panel glass-lift p-6 md:p-10 border-t-4 border-[var(--accent-pink)] animate-fade-in-up">
             <h2 className="text-xl md:text-2xl font-bold mb-6">Connect with us</h2>
             <div style={{ display: "flex", flexDirection: "column", gap: 32 }}>
               <div>
                 <h3 style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Umang Vijay</h3>
                 <p style={{ color: "var(--accent)", fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Co-Founder & CTO</p>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <a href={`mailto:${TEAM_EMAIL}`} style={{ color: "var(--text-secondary)", textDecoration: "none" }}>{TEAM_EMAIL}</a>
+                  <a href={`mailto:${TEAM_EMAIL}`} aria-label={`Email ${TEAM_EMAIL}`} style={{ color: "var(--accent)", textDecoration: "underline", textUnderlineOffset: 3 }}>{TEAM_EMAIL}</a>
                   <a href="https://www.linkedin.com/in/umangvijay/" target="_blank" rel="noopener noreferrer" style={{ color: "var(--text-secondary)", textDecoration: "none" }}>LinkedIn</a>
                   <a href="https://github.com/umangvijay" target="_blank" rel="noopener noreferrer" style={{ color: "var(--text-secondary)", textDecoration: "none" }}>GitHub</a>
                 </div>
@@ -92,7 +90,7 @@ export default function ContactPage() {
             </div>
           </div>
 
-          <div className="glass-panel glass-lift p-6 md:p-10 border-t-4 border-[var(--accent-purple)] animate-fade-in-up" style={{ animationDelay: "80ms" }}>
+          <div data-scroll-reveal className="glass-panel glass-lift p-6 md:p-10 border-t-4 border-[var(--accent-purple)] animate-fade-in-up" style={{ animationDelay: "80ms" }}>
             <h2 className="text-xl md:text-2xl font-bold mb-6">Send a Message</h2>
             {smtpReady === false && (
               <div style={{ padding: 12, marginBottom: 16, background: "var(--warning-subtle, rgba(245,158,11,0.12))", color: "var(--text-secondary)", borderRadius: 12, fontSize: 13, lineHeight: 1.5 }}>
@@ -128,7 +126,7 @@ export default function ContactPage() {
                 </div>
                 <div>
                   <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 6 }}>Message</label>
-                  <textarea className="input" placeholder="How can AgentOS help you?" value={message} onChange={(e) => setMessage(e.target.value)} required style={{ width: "100%", minHeight: 150, resize: "vertical" }} />
+                  <textarea className="input" placeholder="How can Sandtable help you?" value={message} onChange={(e) => setMessage(e.target.value)} required style={{ width: "100%", minHeight: 150, resize: "vertical" }} />
                 </div>
                 <button type="submit" className="btn btn-primary btn-lg" disabled={status === "sending"} style={{ width: "100%" }}>
                   {status === "sending"

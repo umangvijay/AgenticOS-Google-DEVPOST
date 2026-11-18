@@ -3,7 +3,10 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { submitGoal, GoalAttachment } from "@/lib/api";
+import { submitGoal, getSettings, GoalAttachment, ApiError, BudgetErrorBody, AdmissionErrorBody, admissionBodyFrom, newSubmissionKey } from "@/lib/api";
+import { useDraft } from "@/hooks/useDraft";
+import BudgetBlockedNotice from "@/components/BudgetBlockedNotice";
+import AdmissionNotice from "@/components/AdmissionNotice";
 
 const SUGGESTIONS = [
   { label: "OpenAPI MCP", goal: "Create MCP tools from https://raw.githubusercontent.com/PokeAPI/pokeapi/master/openapi.yml then list pokemon" },
@@ -71,9 +74,42 @@ export default function ChatComposer({
   onRunCreated?: (res: { run_id: string; thread_id?: string }) => void;
 }) {
   const router = useRouter();
-  const [goal, setGoal] = useState("");
+  const [models, setModels] = useState<string[]>([]);
+  const [model, setModel] = useState("");
+  useEffect(() => {
+    let active = true;
+    getSettings().then(data => {
+      if (active) { setModels(data.available_models || []); setModel(data.settings.default_model || ""); }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+  // §19 (C9): the submission identity is declared BEFORE the draft so
+  // the hook persists it with the draft record.
+  const [submissionKey, setSubmissionKey] = useState(() => newSubmissionKey());
+  // §18.3: the draft survives refresh/auth expiry (sessionStorage keyed
+  // per thread when one exists).
+  const { draft, setDraft, restored } = useDraft(
+    threadId ?? null, "workspace", submissionKey);
+  const [goal, setGoal] = useState(draft);
+  // §18.19 (finding F1): the stored draft RESTORES into goal when it
+  // arrives — the composer no longer shadows it with an empty state.
+  const touchedRef = useRef(false);
+  useEffect(() => {
+    if (goal !== draft && touchedRef.current) setDraft(goal);
+  }, [goal]);   // eslint-disable-line react-hooks/exhaustive-deps
+  // Adopt the restored draft when it arrives (before any user input).
+  useEffect(() => {
+    if (restored && !touchedRef.current && draft && !goal) {
+      setGoal(draft);
+    }
+  }, [restored, draft]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const [ambiguousAcceptance, setAmbiguousAcceptance] = useState<{
+    key: string; message: string;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [budgetError, setBudgetError] = useState<BudgetErrorBody | null>(null);
+  const [admissionError, setAdmissionError] = useState<AdmissionErrorBody | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [attachments, setAttachments] = useState<Attached[]>([]);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -121,18 +157,30 @@ export default function ChatComposer({
       return;
     }
     setError("");
+    setBudgetError(null);
     setLoading(true);
     try {
       const payload = attachments.map(({ name, mime, text: body, image_base64 }) => ({
         name, mime, text: body, image_base64,
       }));
       const prompt = value || "Use the attached files and photos to complete the request.";
+      // §19 (C9): persist the submission identity + model + attachment
+      // references BEFORE dispatch — a refresh right after an accepted-
+      // but-unacknowledged submission recovers the SAME intent.
+      setDraft(prompt);   // persists submission_identity via the hook contract
       const res = await submitGoal(prompt, payload, {
+        model: model || undefined,
         parent_run_id: parentRunId,
         thread_id: threadId,
+        idempotency_key: submissionKey,
       });
       setGoal("");
+      setDraft("");   // §18.3: the persisted draft clears on success
       setAttachments([]);
+      setBudgetError(null);
+      setAdmissionError(null);
+      setError("");
+      setSubmissionKey(newSubmissionKey());   // success: next submission is a NEW intent
       if (onRunCreated) {
         onRunCreated(res);
         setLoading(false);
@@ -140,7 +188,34 @@ export default function ChatComposer({
         router.push(`/dashboard/workspace/${res.run_id}`);
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to start the run");
+      // §3.19: admission refusals (rate/capacity/queue/provider/outage) get
+      // the precise overload state — the draft is PRESERVED so a retry
+      // resubmits the same intent; budget refusals get their own notice.
+      const admission = admissionBodyFrom(err);
+      if (admission) {
+        setAdmissionError(admission);
+      } else if (err instanceof ApiError && err.body) {
+        setBudgetError(err.body);
+      } else {
+        const message = err instanceof Error ? err.message : "Failed to start the run";
+        // §18.10: an AMBIGUOUS transport failure (timeout) leaves
+        // acceptance UNKNOWN — the SAME submission key is kept so a
+        // retry resolves the same logical command (one external
+        // effect), and the user is told the acceptance state, not just
+        // "retry".
+        const ambiguous = /timed out|timeout/i.test(message);
+        if (ambiguous) {
+          setAmbiguousAcceptance({
+            key: submissionKey,
+            message: ("Your submission may have been accepted — its "
+                      + "status is unknown because the response timed "
+                      + "out. Retrying reuses the same request identity, "
+                      + "so it cannot create a duplicate run."),
+          });
+        } else {
+          setError(message);
+        }
+      }
       setLoading(false);
     }
   }
@@ -152,7 +227,37 @@ export default function ChatComposer({
 
   return (
     <form onSubmit={handleSubmit} className="chat-composer">
-      {error && (
+      {ambiguousAcceptance && (
+        <div role="alert" style={{ padding: 10, marginBottom: 10, borderRadius: 8, background: "var(--bg-tertiary)", fontSize: 13 }}>
+          <strong>Acceptance unknown.</strong> {ambiguousAcceptance.message}{" "}
+          <button type="button" className="btn btn-ghost btn-sm"
+                  onClick={() => setAmbiguousAcceptance(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
+      {models.length > 0 && <label style={{fontSize: 12, color: "var(--text-secondary)"}}>
+        Model <select aria-label="Model for this message" value={model} onChange={e => setModel(e.target.value)}>
+          <option value="">Server default</option>
+          {models.map(id => <option key={id} value={id}>{id}</option>)}
+        </select>
+      </label>}
+
+      {budgetError && (
+        <div style={{ marginBottom: 12 }}>
+          <BudgetBlockedNotice error={budgetError} onRetry={() => { setBudgetError(null); void send(); }} />
+        </div>
+      )}
+      {admissionError && (
+        <div style={{ marginBottom: 12 }}>
+          <AdmissionNotice
+            error={admissionError}
+            onRetry={() => { setAdmissionError(null); void send(); }}
+            // retry reuses the SAME submission key (§4.4)
+          />
+        </div>
+      )}
+      {error && !budgetError && !admissionError && (
         <div style={{
           padding: "10px 14px", marginBottom: 12, background: "var(--error-subtle)",
           borderRadius: 12, color: "var(--error)", fontSize: 13, lineHeight: 1.45,
@@ -220,9 +325,9 @@ export default function ChatComposer({
           </div>
           <textarea
             className="input chat-input"
-            placeholder={disabled ? "AgentOS is working…" : "Ask anything. AgentOS will plan, build missing tools, and do the work."}
+            placeholder={disabled ? "Sandtable is working…" : "Ask anything. Sandtable will plan, build missing tools, and do the work."}
             value={goal}
-            onChange={(e) => setGoal(e.target.value)}
+            onChange={(e) => { touchedRef.current = true; setGoal(e.target.value); }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -231,6 +336,7 @@ export default function ChatComposer({
             }}
             disabled={loading || disabled}
             rows={compact ? 1 : 2}
+            maxLength={50000}
           />
           <button type="submit" className="send-orb" disabled={disabled || loading} aria-label="Send">
             {loading ? <span className="spinner" style={{ width: 16, height: 16 }} /> : (
@@ -240,6 +346,18 @@ export default function ChatComposer({
             )}
           </button>
         </div>
+        {goal.length > 0 && (
+          <div style={{
+            fontSize: 11,
+            color: goal.length >= 49000 ? "var(--error)" : goal.length >= 40000 ? "var(--warning)" : "var(--text-tertiary)",
+            textAlign: "right",
+            padding: "4px 12px 0",
+            fontVariantNumeric: "tabular-nums",
+            opacity: goal.length < 100 ? 0.5 : 1,
+          }}>
+            {goal.length.toLocaleString()} / 50,000
+          </div>
+        )}
       </div>
       {!compact && (
         <div style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>

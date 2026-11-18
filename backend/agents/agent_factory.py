@@ -24,8 +24,11 @@ class AgentFactory:
             span.set_attribute("agent.id", agent_id)
             
             snapshot = self.snapshot_registry.get_snapshot()
-            definitions = snapshot.get_plugin_agent_definitions()
-            
+            user_id = (context or {}).get("user_id")
+            eligible_plugins = [record for record in snapshot.active_plugins
+                                if record.state.value == "ENABLED"
+                                and (record.manifest.scope.value != "USER" or record.installed_by == user_id)]
+            definitions = [agent for record in eligible_plugins for agent in record.manifest.agents]
             agent_def = next((a for a in definitions if a.agent_id == agent_id), None)
             
             if not agent_def:
@@ -37,11 +40,16 @@ class AgentFactory:
             # We need to build the tool functions that delegate to ToolRouter
             agent_tools = []
             if self.tool_router and agent_def.allowed_tools:
-                async def call_plugin_tool(agent_tool_name: str, arguments_json: str) -> str:
+                async def call_plugin_tool(agent_tool_name: str, arguments: dict) -> str:
                     if agent_tool_name not in agent_def.allowed_tools:
                         return f"Error: Tool {agent_tool_name} is not allowed for this agent."
                     try:
-                        args = json.loads(arguments_json)
+                        if isinstance(arguments, str):
+                            args = json.loads(arguments) if arguments.strip() else {}
+                        elif isinstance(arguments, dict):
+                            args = arguments
+                        else:
+                            raise ValueError("Tool arguments must be a JSON object")
                         result = await self.tool_router.execute_tool_safe(agent_tool_name, args, context=context)
                         return str(result)
                     except Exception as e:

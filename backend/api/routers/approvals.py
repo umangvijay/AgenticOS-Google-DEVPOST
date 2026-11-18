@@ -7,6 +7,7 @@ POST /api/v1/approvals/{id}/reject     — Reject and fail the workflow task
 """
 
 import logging
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from backend.models.security import ApprovalStatus
 from backend.models.schemas import TaskTriggerEvent, TaskStatus
@@ -30,6 +31,32 @@ def _approval_field(approval, key: str):
     if isinstance(approval, dict):
         return approval.get(key)
     return getattr(approval, key, None)
+
+
+def _approval_expired(approval) -> bool:
+    expiry = _approval_field(approval, "expires_at")
+    if isinstance(expiry, str):
+        try:
+            expiry = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+    if not isinstance(expiry, datetime):
+        return True
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) >= expiry
+
+
+async def _get_waiting_task(repo, run_id: str, task_id: str):
+    run = await load_run(repo, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Approval workflow run not found")
+    task = next((item for item in run.tasks if item.task_id == task_id), None)
+    if not task:
+        raise HTTPException(status_code=404, detail="Approval task not found")
+    if task.status != TaskStatus.WAITING_APPROVAL:
+        raise HTTPException(status_code=409, detail="Task is no longer waiting for approval")
+    return run, task
 
 
 @router.get("")
@@ -60,25 +87,34 @@ async def approve_request(
     if _approval_field(approval, "user_id") != user.user_id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Not authorized to access this approval")
 
+    # §4.14: the actor's CURRENT authority is rechecked at decision time —
+    # a disabled account cannot approve work (acceptance never grants
+    # permanent permission).
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is disabled")
+
+    run_id = _approval_field(approval, "run_id")
+    task_id = _approval_field(approval, "task_id")
+    workflow_id = _approval_field(approval, "workflow_id")
+    run, task = await _get_waiting_task(repo, run_id, task_id)
+    if _approval_expired(approval):
+        await maybe_await(repo.resolve_approval(
+            approval_id, ApprovalStatus.EXPIRED.value, decision_by="SYSTEM"
+        ))
+        raise HTTPException(status_code=410, detail="Approval request has expired")
+
     success = await maybe_await(
         repo.resolve_approval(approval_id, ApprovalStatus.APPROVED.value, decision_by=user.user_id)
     )
     if not success:
         raise HTTPException(status_code=409, detail="Approval already resolved or not pending")
 
-    run_id = _approval_field(approval, "run_id")
-    task_id = _approval_field(approval, "task_id")
-    workflow_id = _approval_field(approval, "workflow_id")
-
     # Transition the task back to PENDING with the approval bound to it
-    run = await load_run(repo, run_id)
-    if run:
-        for t in run.tasks:
-            if t.task_id == task_id and t.status == TaskStatus.WAITING_APPROVAL:
-                t.status = TaskStatus.PENDING
-                t.input_data["_approved_request_id"] = approval_id
-                await persist_task(repo, run.run_id, t)
-                break
+    await factory.idempotency_repo.reset_failed_task(workflow_id, task_id)
+    task.status = TaskStatus.PENDING
+    task.error = None
+    task.input_data["_approved_request_id"] = approval_id
+    await persist_task(repo, run.run_id, task)
 
     from backend.repositories.audit_repository import ActorType
     audit_repo.log_event(AuditEvent(
@@ -92,6 +128,7 @@ async def approve_request(
         details={"workflow_id": workflow_id, "task_id": task_id}
     ))
 
+    await maybe_await(repo.update_run_status(run_id, "RUNNING"))
     event = TaskTriggerEvent(workflow_id=workflow_id, run_id=run_id, task_id=task_id)
     await factory.message_bus.publish("agentos-workflow-events", event)
 
@@ -115,24 +152,31 @@ async def reject_request(
     if _approval_field(approval, "user_id") != user.user_id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Not authorized to access this approval")
 
+    # §4.14: the actor's CURRENT authority is rechecked at decision time —
+    # a disabled account cannot approve work (acceptance never grants
+    # permanent permission).
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is disabled")
+
+    run_id = _approval_field(approval, "run_id")
+    task_id = _approval_field(approval, "task_id")
+    workflow_id = _approval_field(approval, "workflow_id")
+    run, task = await _get_waiting_task(repo, run_id, task_id)
+    if _approval_expired(approval):
+        await maybe_await(repo.resolve_approval(
+            approval_id, ApprovalStatus.EXPIRED.value, decision_by="SYSTEM"
+        ))
+        raise HTTPException(status_code=410, detail="Approval request has expired")
+
     success = await maybe_await(
         repo.resolve_approval(approval_id, ApprovalStatus.REJECTED.value, decision_by=user.user_id)
     )
     if not success:
         raise HTTPException(status_code=409, detail="Approval already resolved or not pending")
 
-    run_id = _approval_field(approval, "run_id")
-    task_id = _approval_field(approval, "task_id")
-    workflow_id = _approval_field(approval, "workflow_id")
-
-    run = await load_run(repo, run_id)
-    if run:
-        for t in run.tasks:
-            if t.task_id == task_id and t.status == TaskStatus.WAITING_APPROVAL:
-                t.status = TaskStatus.FAILED
-                t.error = "Human approval rejected"
-                await persist_task(repo, run.run_id, t)
-                break
+    task.status = TaskStatus.FAILED
+    task.error = "Human approval rejected"
+    await persist_task(repo, run.run_id, task)
 
     from backend.repositories.audit_repository import ActorType
     audit_repo.log_event(AuditEvent(

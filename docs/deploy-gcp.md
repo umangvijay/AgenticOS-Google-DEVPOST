@@ -1,324 +1,182 @@
-# Deploy AgentOS on Google Cloud ($150 credits)
+# Deploy Sandtable to Google Cloud with Vertex AI
 
-This is the full path: redeem credits, use **Vertex AI Gemini** (project quotas, not an AI Studio key), deploy Cloud Run, and install a **$100 kill switch**.
+This guide publishes the current application; it does not certify production readiness. See [implementation status](implementation-status.md) and [remaining release gates](production-readiness.md). Run commands in Cloud Shell, in order. No command below upgrades your billing account.
 
-Google Cloud has **no hard spending cap**. A budget only emails you unless you attach a function that stops the project. This repo’s function scales Cloud Run to zero and unlinks billing when reported usage reaches **$100**. That leaves **~$50** of a $150 grant as a buffer because budget notices can lag. Official pattern: [Disable billing with notifications](https://cloud.google.com/billing/docs/how-to/disable-billing-with-notifications).
+## 1. Keep your free trial
 
-Do this in [Google Cloud Shell](https://shell.cloud.google.com) or a laptop with the [gcloud CLI](https://cloud.google.com/sdk/docs/install). Replace `YOUR_PROJECT_ID` everywhere.
+Select your existing project linked to your **Free Trial billing account**. Do not click **Activate / Upgrade** if you do not want a paid account. Confirm remaining credit and expiry in Billing first. Google currently provides $300 for 90 days; without upgrading, resources stop when either runs out. Trial accounts cannot request quota increases or use managed partner models. This guide uses **Google models through Vertex AI**. Individual model access still needs verification in your project.
 
----
+**Policy checked November 18, 2026:** accounts created before November 16, 2026 can continue using their trial credits for the Vertex/Gemini API while staying on the trial. Accounts created on or after November 16 cannot use the welcome credit for these services. Upgrading an older trial on or after that date also removes this credit coverage. See the [Google billing change FAQ](https://firebase.google.com/docs/ai-logic/faq-and-troubleshooting). Do not assume an upgrade preserves Vertex credit coverage.
 
-## 1. Redeem the credit code
+Source: [Google Cloud trial terms and restrictions](https://docs.cloud.google.com/free/docs/free-cloud-features).
 
-1. Sign in at [console.cloud.google.com](https://console.cloud.google.com) with the Google account that owns the code.
-2. Open **Billing** → **Credits** / **Offers**, or go directly to [console.cloud.google.com/billing](https://console.cloud.google.com/billing).
-3. Use **Redeem promo code** / **Apply promotion** and paste the code. If the code is from a program (hackathon, education, startup), their email usually has the exact redeem URL.
-4. Confirm the credit shows on **the billing account you will attach to this project** (amount, expiry). Credits are per billing account, not per project.
-5. If you also have a free-trial card hold, that is separate. Promo credits still need a billing account; they just pay the invoice until they run out.
+Set a Billing budget with alerts at 50%, 80%, and 90% of your remaining credit, excluding credits from the reported gross cost. Alerts are delayed notifications, not a spending cap. The pull worker runs continuously and consumes credit while idle. Use a small test deployment first; do not invite public users until release checks pass.
 
-You cannot spend the grant until a **project is linked** to that billed account.
-
----
-
-## 2. Create a project and attach billing
+## 2. Get the code and enable services
 
 ```bash
-gcloud auth login
-gcloud auth application-default login
-
-# Optional: create a dedicated project so the kill switch cannot take down unrelated work
-gcloud projects create YOUR_PROJECT_ID --name="AgentOS"
-gcloud config set project YOUR_PROJECT_ID
-
-gcloud billing accounts list
-# Copy the ACCOUNT_ID (XXXXXX-XXXXXX-XXXXXX)
-
-gcloud billing projects link YOUR_PROJECT_ID --billing-account=ACCOUNT_ID
-```
-
-Use **one project for AgentOS only**. If the kill switch unlinks billing, everything in that project stops.
-
----
-
-## 3. Vertex Gemini (higher RPM / TPM) vs AI Studio key
-
-| | AI Studio API key (`GEMINI_API_KEY`) | Vertex AI on this project |
-| --- | --- | --- |
-| Auth | Key string | Cloud Run service account (no key in `.env`) |
-| Quotas | AI Studio free / pay-as-you-go limits | **Vertex paid quotas** on the billed project (typically much higher RPM/TPM) |
-| Pays from | Often a different Google AI billing | **This GCP billing account / your $150 credits** |
-| AgentOS | Set `GEMINI_API_KEY` | Leave `GEMINI_API_KEY` **empty**; set `GOOGLE_CLOUD_PROJECT` + `GOOGLE_CLOUD_REGION` |
-
-This repo already switches automatically (`backend/services/gemini_client.py`): if there is no API key, it uses `vertexai=True` with your project and region.
-
-**Do not** mount an AI Studio key on Cloud Run if you want Vertex quotas. A vault key named `gemini` also forces the API-key path.
-
-Enable Vertex and grant the Cloud Run runtime identity:
-
-```bash
-gcloud services enable aiplatform.googleapis.com run.googleapis.com \
-  artifactregistry.googleapis.com cloudbuild.googleapis.com \
-  secretmanager.googleapis.com firestore.googleapis.com \
-  --project=YOUR_PROJECT_ID
-
-PROJECT_NUMBER="$(gcloud projects describe YOUR_PROJECT_ID --format='value(projectNumber)')"
-# Default Compute SA used by Cloud Run unless you set a custom SA:
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
-  --role="roles/aiplatform.user"
-```
-
-Vertex usage is **usage-based** and draws down credits. Flash is cheaper than Pro. Keep `GEMINI_MODEL=gemini-3.6-flash` (fallback `gemini-3.5-flash`). Do not use Gemini 2.x. Heavy chat + MCP builds can spend more than Cloud Run CPU.
-
----
-
-## 4. Secrets (never `.env` in the image)
-
-`.dockerignore` already excludes `.env`. Create only what you need.
-
-```bash
-# Vault master key — generate once and keep it; losing it makes vault ciphertext unreadable
-python3 -c "import secrets; print(secrets.token_urlsafe(48))" | \
-  gcloud secrets create secrets-master-key --data-file=-
-
-# JWT PEMs — required in production (Cloud Run has no durable disk for auto-generated keys)
-openssl genrsa -out /tmp/jwt-private.pem 2048
-openssl rsa -in /tmp/jwt-private.pem -pubout -out /tmp/jwt-public.pem
-gcloud secrets create jwt-private-key --data-file=/tmp/jwt-private.pem
-gcloud secrets create jwt-public-key --data-file=/tmp/jwt-public.pem
-rm -f /tmp/jwt-private.pem /tmp/jwt-public.pem
-
-# Optional contact form: Gmail App Password only, never the mailbox password
-# echo -n 'xxxx xxxx xxxx xxxx' | gcloud secrets create contact-smtp-password --data-file=-
-```
-
-**Do not** create `gemini-api-key` if you are using Vertex. Do **not** set `GEMINI_API_KEY` on Cloud Run.
-
-Grant the Cloud Run runtime SA access to those secrets (`roles/secretmanager.secretAccessor`) and to Firestore (`roles/datastore.user`).
-
----
-
-## 5. Durable data (Firestore)
-
-**SQLite on Cloud Run is deleted** when the instance scales to zero. Local development still uses SQLite (`STORAGE_BACKEND=sqlite`). Production Cloud Run must use Firestore.
-
-```bash
-gcloud firestore databases create --location=nam5 --type=firestore-native --project=YOUR_PROJECT_ID
-```
-
-Set `STORAGE_BACKEND=firestore` and `GOOGLE_CLOUD_PROJECT` on the API service. Do not use Firebase Realtime Database.
-
----
-
-## 6. Deploy the API (Cloud Run)
-
-Use the root **`Dockerfile`**. Do not deploy a second worker service. `cloudbuild.yaml` builds the API image only; if Cloud Run GitHub continuous deployment is already connected, do **not** also add a Cloud Build trigger on `cloudbuild.yaml`.
-
-Create the Firestore database and Secret Manager secrets (section 4–5) **before** this deploy. Production startup requires `SECRETS_MASTER_KEY` and JWT PEMs.
-
-### Cloud Shell (recommended)
-
-Open [shell.cloud.google.com](https://shell.cloud.google.com) **in the project that has billing**. Do **not** upload the Mac folder with parentheses. Clone GitHub:
-
-```bash
-export PROJECT_ID=YOUR_PROJECT_ID
+export PROJECT_ID='YOUR_PROJECT_ID'
+export REGION='us-central1'
 gcloud config set project "$PROJECT_ID"
-
-git clone https://github.com/umangvijay/AgenticOS-Google-DEVPOST.git
-cd AgenticOS-Google-DEVPOST
-
-bash scripts/gcp/deploy-api-cloudshell.sh
+git clone https://github.com/umangvijay/AgenticOS-Google-DEVPOST.git SANDTABLE
+cd SANDTABLE
+export RELEASE="$(git rev-parse --short HEAD)"
+export IMAGE_ROOT="$REGION-docker.pkg.dev/$PROJECT_ID/veyrune"
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com aiplatform.googleapis.com \
+  firestore.googleapis.com secretmanager.googleapis.com pubsub.googleapis.com
+gcloud artifacts repositories create veyrune --repository-format=docker --location="$REGION"
 ```
 
-Or the equivalent after `gcloud config set project`:
+For an existing repository/resource, inspect and reuse it; do not delete it to rerun creation commands. If enabling a service prompts you to upgrade billing, stop and check eligibility; this guide does not require consenting to that upgrade.
+
+## 3. Runtime identities and persistent storage
 
 ```bash
-gcloud config set builds/timeout 1800
-
-gcloud run deploy agentos-api \
-  --source . \
-  --region us-central1 \
-  --allow-unauthenticated \
-  --min-instances 0 \
-  --max-instances 4 \
-  --memory 1Gi \
-  --cpu 1 \
-  --timeout 300 \
-  --set-env-vars "APP_ENV=production,STORAGE_BACKEND=firestore,GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=us-central1,GEMINI_MODEL=gemini-3.6-flash" \
-  --set-secrets "SECRETS_MASTER_KEY=secrets-master-key:latest,JWT_PRIVATE_KEY=jwt-private-key:latest,JWT_PUBLIC_KEY=jwt-public-key:latest"
+gcloud iam service-accounts create veyrune-api
+gcloud iam service-accounts create veyrune-worker
+export API_SA="veyrune-api@$PROJECT_ID.iam.gserviceaccount.com"
+export WORKER_SA="veyrune-worker@$PROJECT_ID.iam.gserviceaccount.com"
+for sa in "$API_SA" "$WORKER_SA"; do
+  for role in roles/aiplatform.user roles/datastore.user; do
+    gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+      --member="serviceAccount:$sa" --role="$role" --condition=None
+  done
+done
+# Skip if the (default) Firestore database already exists.
+gcloud firestore databases create --database='(default)' --location="$REGION" --type=firestore-native
+for topic in agentos-workflow-events agentos-scheduler-triggers agentos-recovery-events; do
+  gcloud pubsub topics create "$topic"
+  gcloud pubsub subscriptions create "$topic-worker-sub" --topic="$topic" --ack-deadline=600
+  for sa in "$API_SA" "$WORKER_SA"; do
+    gcloud pubsub topics add-iam-policy-binding "$topic" \
+      --member="serviceAccount:$sa" --role=roles/pubsub.publisher
+  done
+  gcloud pubsub subscriptions add-iam-policy-binding "$topic-worker-sub" \
+    --member="serviceAccount:$WORKER_SA" --role=roles/pubsub.subscriber
+done
 ```
 
-Do **not** set `GEMINI_API_KEY`. Vertex uses Application Default Credentials / the Cloud Run service account.
+Use Firestore for both API and worker. SQLite on Cloud Run is ephemeral. Keep the existing `agentos-` topic names: these are internal protocol names, independent of product branding. Review `firestore.indexes.json` and create any required composite indexes before testing queries.
 
-There is a root `Dockerfile`. You do **not** need `--dockerfile Dockerfile.api`.
+Cloud Build's build identity needs Artifact Registry Writer, Logs Writer, and access to its source bucket. Determine the actual identity with `gcloud builds get-default-service-account`; grant those roles to that identity if a build reports permission denied. The person deploying also needs permission to act as the runtime identities. Do not solve IAM errors by granting Owner to runtime services.
 
-### Cloud Console (manual)
+## 4. Create secrets once
 
-1. [Cloud Run](https://console.cloud.google.com/run) → **Create service**.
-2. **Continuously deploy from a repository** (GitHub: `umangvijay/AgenticOS-Google-DEVPOST`) **or** deploy from Cloud Shell source (the clone above).
-3. Build type: **Dockerfile**. Path: **`Dockerfile`** at the repo root. Do not connect a second Cloud Build trigger to `cloudbuild.yaml`.
-4. Region `us-central1`. Allow unauthenticated. Memory **1 GiB**. Request timeout 300s. Container port **8080**.
-5. Variables: `APP_ENV=production`, `STORAGE_BACKEND=firestore`, `GOOGLE_CLOUD_PROJECT=<id>`, `GOOGLE_CLOUD_REGION=us-central1`, `GEMINI_MODEL=gemini-3.6-flash`. Do **not** set `GEMINI_API_KEY`.
-6. Secrets: `SECRETS_MASTER_KEY`, `JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY` from Secret Manager.
+Never replace an existing vault master key or password pepper during an ordinary redeploy. Existing ciphertext/passwords depend on them. Use Secret Manager versions and a planned migration for rotation. Existing installations must retain their current secrets.
 
-Wait until the revision is **green**, then:
+For a **new installation**:
 
 ```bash
-curl -sS "$(gcloud run services describe agentos-api --region us-central1 --format='value(status.url)')/health"
+umask 077
+SECRET_DIR="$(mktemp -d)"
+python3 -c 'import secrets; print(secrets.token_urlsafe(48), end="")' | \
+  gcloud secrets create secrets-master-key --data-file=-
+python3 -c 'import secrets; print(secrets.token_urlsafe(48), end="")' | \
+  gcloud secrets create password-pepper --data-file=-
+openssl genrsa -out "$SECRET_DIR/private.pem" 3072
+openssl rsa -in "$SECRET_DIR/private.pem" -pubout -out "$SECRET_DIR/public.pem"
+gcloud secrets create jwt-private-key --data-file="$SECRET_DIR/private.pem"
+gcloud secrets create jwt-public-key --data-file="$SECRET_DIR/public.pem"
+rm "$SECRET_DIR/private.pem" "$SECRET_DIR/public.pem"
+rmdir "$SECRET_DIR"
+for secret in secrets-master-key password-pepper jwt-private-key jwt-public-key; do
+  for sa in "$API_SA" "$WORKER_SA"; do
+    gcloud secrets add-iam-policy-binding "$secret" \
+      --member="serviceAccount:$sa" --role=roles/secretmanager.secretAccessor
+  done
+done
 ```
 
-Expect `"status":"healthy"`, `"storage":"firestore"`, and `"llm":"vertex"`.
+Do not put provider keys or service-account JSON files in GitHub. Vertex uses the attached service identity automatically. Previously shared keys should be revoked at their providers; they are not needed here.
 
-Grant Vertex and Firestore to the runtime SA:
+## 5. Choose and verify a Vertex model
+
+In Vertex AI Model Garden, choose a currently available Google Gemini model supporting text, JSON output and function calling. Prefer a stable Flash model for initial cost-controlled testing. Consult the [current model catalog](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/models). Newest does not automatically mean enabled, cheapest, or compatible with this application's SDK.
+
+The current code defaults to `gemini-3.8-flash`. Set the exact model IDs you verified. The examples enable this model plus `gemini-3.5-flash-lite`; run the probe for both before deploying. Multiple specialized agents can share these models: an allow-list enables model selection/fallback, but does not assign a different model to every agent. Do not assume preview/partner models are covered. The generation location is `global`; verify regional availability if you change it. Embeddings use `gemini-embedding-001` in `us-central1`.
 
 ```bash
-PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
-  --role="roles/aiplatform.user"
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
-  --role="roles/datastore.user"
+export MODEL='gemini-3.8-flash'
+# This tests your Cloud Shell identity; the deployed workflow test later checks runtime identity.
+curl --fail-with-body \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  -H 'Content-Type: application/json' \
+  "https://aiplatform.googleapis.com/v1/projects/$PROJECT_ID/locations/global/publishers/google/models/$MODEL:generateContent" \
+  -d '{"contents":[{"role":"user","parts":[{"text":"Reply with OK"}]}],"generationConfig":{"maxOutputTokens":64}}'
 ```
 
-### If it still fails
+Stop on 403/404: verify project, model access, IAM and location. A 429 requires lower concurrency/backoff or available capacity, not another API key. Vertex does not guarantee unlimited inference. Do not upgrade the trial to bypass a restriction without deciding that separately.
 
-| Symptom | Fix |
-| --- | --- |
-| `No module named 'bcrypt'` | Rebuild from latest `main` (`bcrypt==5.0.0` is in `requirements.txt`). |
-| Build timeout / Playwright / Chromium | This Dockerfile no longer installs browsers. Pull latest `main` and redeploy. |
-| `unrecognized arguments: --dockerfile` | Old `gcloud`. Use root `Dockerfile` and omit `--dockerfile`. |
-| Revision not ready / container failed | Logs: missing Secret Manager secrets, or Firestore database not created, or `GOOGLE_CLOUD_PROJECT` unset. |
-| APIs / billing | Enable `run`, `cloudbuild`, `artifactregistry`, `aiplatform`, `firestore`, `secretmanager`. Link billing. |
-| Build context huge | Clone GitHub in Cloud Shell; do not upload `AgenticOS(Google DEVPOST)`. |
-| Two Cloud Run services after a push | Disconnect any Cloud Build trigger that deployed `agenticos-worker`. Use only the API service from the root Dockerfile. |
-
----
-
-## 7. Deploy the frontend
+## 6. Build and deploy API + pull worker
 
 ```bash
-cd frontend
-
-# Next.js bakes NEXT_PUBLIC_API_URL at image build time. Include /api/v1.
-# Cloud Run sets PORT at runtime; the frontend image listens on ${PORT:-8080}.
-gcloud run deploy agentos-frontend \
-  --source . \
-  --dockerfile Dockerfile.frontend \
-  --region us-central1 \
-  --allow-unauthenticated \
-  --min-instances 0 \
-  --max-instances 4 \
-  --memory 512Mi \
-  --port 8080 \
-  --set-build-env-vars "NEXT_PUBLIC_API_URL=https://YOUR-API-URL/api/v1" \
-  --project=YOUR_PROJECT_ID
+gcloud builds submit --config cloudbuild.yaml \
+  --substitutions="COMMIT_SHA=$(git rev-parse HEAD),_API_IMAGE=$IMAGE_ROOT/api:$RELEASE,_WORKER_IMAGE=$IMAGE_ROOT/worker:$RELEASE"
+# Use a custom delimiter because GEMINI_ALLOWED_MODELS contains commas.
+export COMMON_ENV="^@^APP_ENV=production@STORAGE_BACKEND=firestore@MESSAGE_BUS_TRANSPORT=pubsub@LLM_PROVIDER=vertex@GOOGLE_CLOUD_PROJECT=$PROJECT_ID@GOOGLE_CLOUD_REGION=global@GEMINI_MODEL=$MODEL@GEMINI_ALLOWED_MODELS=$MODEL,gemini-3.5-flash-lite@GEMINI_EMBEDDING_MODEL=gemini-embedding-001@GEMINI_EMBEDDING_REGION=us-central1"
+export SECRET_BINDINGS='SECRETS_MASTER_KEY=secrets-master-key:latest,PASSWORD_PEPPER=password-pepper:latest,JWT_PRIVATE_KEY=jwt-private-key:latest,JWT_PUBLIC_KEY=jwt-public-key:latest'
+gcloud run deploy veyrune-api --image="$IMAGE_ROOT/api:$RELEASE" \
+  --region="$REGION" --service-account="$API_SA" --allow-unauthenticated \
+  --min-instances=0 --max-instances=2 --cpu=1 --memory=1Gi --timeout=300 --port=8080 \
+  --set-env-vars="$COMMON_ENV@RUN_WORKER=0" --set-secrets="$SECRET_BINDINGS"
+export API_URL="$(gcloud run services describe veyrune-api --region="$REGION" --format='value(status.url)')"
+gcloud run worker-pools deploy veyrune-worker --image="$IMAGE_ROOT/worker:$RELEASE" \
+  --region="$REGION" --service-account="$WORKER_SA" --instances=1 --cpu=1 --memory=2Gi \
+  --set-env-vars="$COMMON_ENV@WORKER_ONLY=1" --set-secrets="$SECRET_BINDINGS"
+curl --fail "$API_URL/health"
 ```
 
-Copy the frontend URL. Update the API CORS (comma-separated origin, no localhost):
+The API is reachable publicly so the browser can call it; protected routes still require application authentication. The worker is a **Worker Pool**, not an HTTP Cloud Run service: it has no listening port. If your trial/project cannot deploy a Worker Pool, stop; deploying only the API will leave automation incomplete. Do not declare a healthy API proof that workflows work.
+
+## 7. Build and deploy the website
 
 ```bash
-gcloud run services update agentos-api --region us-central1 \
-  --update-env-vars "FRONTEND_BASE_URL=https://YOUR-FRONTEND-URL,CORS_ALLOWED_ORIGINS=https://YOUR-FRONTEND-URL"
+gcloud builds submit --config cloudbuild.frontend.yaml \
+  --substitutions="_FRONTEND_IMAGE=$IMAGE_ROOT/frontend:$RELEASE,_API_URL=$API_URL/api/v1"
+gcloud run deploy veyrune-frontend --image="$IMAGE_ROOT/frontend:$RELEASE" \
+  --region="$REGION" --allow-unauthenticated --min-instances=0 --max-instances=2 \
+  --memory=512Mi --cpu=1 --port=8080
+export WEB_URL="$(gcloud run services describe veyrune-frontend --region="$REGION" --format='value(status.url)')"
+gcloud run services update veyrune-api --region="$REGION" \
+  --update-env-vars="FRONTEND_BASE_URL=$WEB_URL,CORS_ALLOWED_ORIGINS=[\"$WEB_URL\"]"
+printf '%s\n' "$WEB_URL"
 ```
 
-Open the frontend URL. **Get started for free**, then use chat MCP as on localhost.
+The API URL is baked into the frontend build. Changing only a runtime frontend variable will not update it. For a custom domain, update frontend links, API CORS, and any OAuth redirect URI. Configure email/OAuth separately if you enable those login paths; secrets alone do not provision an email provider.
 
-Website MCP (headed browser / CAPTCHA) is a poor fit for Cloud Run. HTTP OpenAPI and public APIs work.
+## 8. Verify before accepting users
 
----
+Sign up/sign in, send a chat, reload to verify history, create a harmless public HTTP MCP connector, run it, then run a workflow that creates a missing connector and uses it. Check approval/rejection, cancellation, restart recovery, tenant isolation, artifact downloads and embedding-backed memory. Inspect Operations and worker logs.
 
-## 8. $100 kill switch (required for a $150 grant)
-
-### What it does
-
-```mermaid
-flowchart LR
-  usage[Vertex + Cloud Run usage] --> budget[Budget $100 gross]
-  budget -->|50% 80% 90%| email[Email to you]
-  budget -->|cost ≥ $100| pubsub[Pub/Sub topic]
-  pubsub --> fn[Cloud Function]
-  fn --> run0[Cloud Run max instances = 0]
-  fn --> unlink[Unlink billing from project]
-```
-
-- Budget is **$100**, scoped to **this project only**.
-- **Exclude all credits** so the number is **gross usage** (what the grant is paying). If you *include* credits, the budget can stay ~$0 until the grant is gone, then you pay cash — too late.
-- At **$100** the function stops Cloud Run and **disables billing** on the project. Vertex stops. The site goes down.
-- Alerts at 50 / 80 / 90% only email you (add your Gmail on the budget in the console).
-
-### Install
-
-You must be **Billing Account Administrator** (or able to add IAM on the billing account).
+For the automated deployed test, use a short-lived **application access token** from your signed-in test user (not a Google token):
 
 ```bash
-export PROJECT_ID=YOUR_PROJECT_ID
-export BILLING_ACCOUNT_ID=XXXXXX-XXXXXX-XXXXXX   # from gcloud billing accounts list
-export REGION=us-central1
-
-# First deploy: dry run (logs only)
-export SIMULATE_DEACTIVATION=true
-bash scripts/gcp-killswitch/deploy.sh
-
-# Fake a $100.01 notice and read logs
-gcloud pubsub topics publish agentos-billing-kill \
-  --project="$PROJECT_ID" \
-  --message='{"costAmount":100.01,"budgetAmount":100,"currencyCode":"USD"}'
-
-gcloud functions logs read agentos-stop-billing --region=us-central1 --gen2 --limit=30
+read -rs -p 'Application access token: ' VEYRUNE_TEST_TOKEN; echo
+export VEYRUNE_TEST_TOKEN
+python3 scripts/verify_deployed_workflows.py --api-url="$API_URL/api/v1" --mcp
+unset VEYRUNE_TEST_TOKEN
 ```
 
-You should see `SIMULATE: would unlink billing`. Then turn it live:
+This creates real persisted test runs and consumes inference credits. It does not silently approve actions. A pending approval needs review in the UI. A failure is a deployment gate, not something to hide with demo output. Browser Chromium runs server-side; a streamed interactive desktop is not automatically provided by Cloud Run.
 
-```bash
-export SIMULATE_DEACTIVATION=false
-bash scripts/gcp-killswitch/deploy.sh
-```
+## 9. Updates, rollback, and cost control
 
-If `gcloud billing budgets create` fails, create the budget in **Billing → Budgets & alerts**:
+**Repeat deploys:** discover the existing service/pool names and use them
+explicitly. Build images tagged with the new commit, then deploy the API and
+frontend using `gcloud run deploy SERVICE --image=IMAGE --region=REGION`.
+Deploy the worker using `gcloud run worker-pools deploy POOL --image=IMAGE
+--region=REGION`. The legacy `deploy-safe.sh` treats the worker as an HTTP
+service and should not be used for this Worker Pool topology. Use
+`--update-env-vars` only for settings intentionally changed; `--set-env-vars`
+replaces the entire environment. Preserve existing secrets, service accounts,
+database, OAuth configuration, and URLs. Rebuild the frontend with both its API
+URL and the existing `_GOOGLE_CLIENT_ID` substitution when Google sign-in is used.
+After deploying, run `python3 scripts/gcp/verify-p0-production.py` and see
+`docs/ops-runbook.md` for rollback and incident playbooks.
 
-| Field | Value |
-| --- | --- |
-| Amount | 100 USD |
-| Projects | YOUR_PROJECT_ID only |
-| Credit types | **Exclude all credits** (gross cost) |
-| Thresholds | 50%, 80%, 90%, 100% |
-| Email | your Gmail |
-| Pub/Sub | `projects/YOUR_PROJECT_ID/topics/agentos-billing-kill` |
+For updates: `git pull --ff-only`, set `RELEASE` to the new commit, rebuild the three images and repeat deploy commands using the same secrets, service identities and database. Record previous image digests and service revisions before updating. Roll HTTP traffic back to a known revision with `gcloud run services update-traffic SERVICE --to-revisions=REVISION=100 --region="$REGION"`; redeploy the previous worker image separately. Database changes may require a migration rollback plan.
 
-If the function log says permission denied, in **Billing → Account management** add the function’s service account (from `gcloud functions describe agentos-stop-billing`) with **Project Billing Manager**.
+To pause test execution, scale the Worker Pool to zero in Cloud Run and stop submitting workflows. API/frontend with minimum zero scale down when idle; storage, builds and retained images can still consume credit. Delete unused images and review Billing regularly. Back up Firestore and test restoration before a public launch. Keep exports before the trial ends; without upgrading, Google stops resources at expiry/exhaustion.
 
-### After it fires
-
-The project has no billing account. Cloud Run and Vertex stop. To bring AgentOS back: **Billing → My projects → Account management → change billing**, link the account again, then:
-
-```bash
-gcloud run services update agentos-api --region us-central1 --max-instances 4
-gcloud run services update agentos-frontend --region us-central1 --max-instances 4
-```
-
----
-
-## 9. Watch spend (do this anyway)
-
-- [Billing reports](https://console.cloud.google.com/billing) filtered to this project  
-- [Vertex AI / Gemini usage](https://console.cloud.google.com/vertex-ai)  
-- Cloud Run → Metrics (request count). Idle with `min-instances 0` costs ~$0.
-
-Delete unused services when the contest is over:
-
-```bash
-gcloud run services delete agentos-api --region us-central1 --quiet
-gcloud run services delete agentos-frontend --region us-central1 --quiet
-```
-
----
-
-## 10. What this will not do
-
-- It will **not** stop spend at the exact second you hit $100. Leave the $50 buffer.
-- It will **not** use AI Studio “free” Gemini RPM. Vertex on a billed project is paid (from credits) and uses **Vertex** quotas.
-- It will **not** keep SQLite data across scale-to-zero.
-- It will **not** redeem the code for you; only the account that owns the code can.
-
-Code: `scripts/gcp-killswitch/`. Terraform under `terraform/environments/dev` is a larger stack (Pub/Sub worker, extra Cloud Run). Prefer this Cloud Run + Vertex + kill-switch path on a $150 grant.
+Remaining production gates include live project verification, load/failure testing, monitoring/alerts, recovery drills, hardened execution isolation, and independent security review. See [production readiness](production-readiness.md).

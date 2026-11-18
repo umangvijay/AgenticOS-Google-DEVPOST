@@ -18,11 +18,13 @@ Endpoints:
 import uuid
 import os
 import logging
+import asyncio
 from datetime import datetime, timezone, timedelta
 
 import bcrypt
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
+from pydantic import BaseModel
 
 from backend.models.user import (
     SignupRequest, LoginRequest, GoogleAuthRequest, RefreshRequest,
@@ -30,13 +32,14 @@ from backend.models.user import (
 )
 from backend.security.password import (
     hash_password, verify_password, validate_password_strength,
+    password_hash_needs_upgrade,
     check_lockout, should_lock_account, get_lockout_until,
 )
 from backend.security.jwt_manager import jwt_manager, JWTManager
 from backend.security.google_oauth import (
     exchange_code_for_tokens, verify_google_id_token, GoogleOAuthError,
 )
-from backend.security.rate_limiter import check_rate_limit, get_client_identifier
+from backend.security.rate_limiter import check_rate_limit, check_shared_rate_limit, get_client_identifier
 from backend.security.input_sanitizer import (
     sanitize_email, sanitize_name, sanitize_text, InputValidationError,
 )
@@ -44,6 +47,14 @@ from backend.api.dependencies.auth import get_current_user, AuthenticatedUser
 from backend.config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+_PASSWORD_HASH_SLOTS = asyncio.Semaphore(4)
+
+
+async def _password_work(function, *args):
+    """Bound memory-hard password operations and keep them off the event loop."""
+    async with _PASSWORD_HASH_SLOTS:
+        return await asyncio.to_thread(function, *args)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -58,6 +69,16 @@ def _get_factory(request: Request):
     return factory
 
 
+async def _create_account(factory, payload):
+    """Uniqueness is enforced in storage, including concurrent signup requests."""
+    import sqlite3
+    from backend.models.exceptions import DuplicateIdentityError
+    try:
+        return await factory.user_repo.create_user(payload)
+    except (DuplicateIdentityError, sqlite3.IntegrityError) as exc:
+        raise HTTPException(status_code=409, detail="Account already registered; please sign in") from exc
+
+
 # ══════════════════════════════════════════════════════════════════
 #  SIGNUP
 # ══════════════════════════════════════════════════════════════════
@@ -70,6 +91,7 @@ async def signup(body: SignupRequest, request: Request):
     # Rate limit
     client_id = get_client_identifier(request)
     check_rate_limit(client_id, "auth")
+    await check_shared_rate_limit(client_id, group="auth")
 
     # Sanitize inputs
     try:
@@ -92,11 +114,11 @@ async def signup(body: SignupRequest, request: Request):
     user_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
-    await factory.user_repo.create_user({
+    await _create_account(factory, {
         "id": user_id,
         "email": email,
         "name": name,
-        "password_hash": hash_password(body.password),
+        "password_hash": await _password_work(hash_password, body.password),
         "auth_provider": "local",
         "role": "user",
     })
@@ -142,6 +164,7 @@ async def login(body: LoginRequest, request: Request):
     # Rate limit
     client_id = get_client_identifier(request)
     check_rate_limit(client_id, "auth")
+    await check_shared_rate_limit(client_id, group="auth")
 
     # Sanitize
     try:
@@ -152,6 +175,9 @@ async def login(body: LoginRequest, request: Request):
     # Find user
     user = await factory.user_repo.get_by_email(email)
     if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    if not user.get("is_active", True):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     # Check if it's an OAuth-only account
@@ -170,7 +196,7 @@ async def login(body: LoginRequest, request: Request):
         raise HTTPException(status_code=423, detail=lock_msg)
 
     # Verify password
-    if not verify_password(body.password, user.get("password_hash", "")):
+    if not await _password_work(verify_password, body.password, user.get("password_hash", "")):
         # Increment failed attempts
         new_count = await factory.user_repo.increment_failed_logins(user["id"])
 
@@ -186,6 +212,13 @@ async def login(body: LoginRequest, request: Request):
 
     # Success — reset failed attempts
     await factory.user_repo.reset_failed_logins(user["id"])
+
+    # Upgrade bcrypt / old-parameter hashes after successful authentication.
+    # This is transparent to the user and avoids a forced password reset.
+    if await _password_work(password_hash_needs_upgrade, user.get("password_hash", "")):
+        await factory.user_repo.update_user(user["id"], {
+            "password_hash": await _password_work(hash_password, body.password),
+        })
 
     # Update last login
     await factory.user_repo.update_user(user["id"], {
@@ -236,6 +269,7 @@ async def google_auth(body: GoogleAuthRequest, request: Request):
     # Rate limit
     client_id = get_client_identifier(request)
     check_rate_limit(client_id, "auth")
+    await check_shared_rate_limit(client_id, group="auth")
 
     try:
         if body.code:
@@ -261,23 +295,27 @@ async def google_auth(body: GoogleAuthRequest, request: Request):
         # Check if email already exists with local auth
         existing = await factory.user_repo.get_by_email(google_user["email"])
         if existing:
+            if not existing.get("is_active", True):
+                raise HTTPException(status_code=401, detail="User account deactivated")
             # Link Google account to existing local user
             await factory.user_repo.update_user(existing["id"], {
                 "google_id": google_user["google_id"],
                 "avatar_url": google_user.get("avatar_url"),
                 "auth_provider": "google",
+                "email_verified": bool(google_user.get("email_verified", True)),
             })
             user = await factory.user_repo.get_by_id(existing["id"])
         else:
             # Create new user
             user_id = str(uuid.uuid4())
-            await factory.user_repo.create_user({
+            await _create_account(factory, {
                 "id": user_id,
                 "email": google_user["email"],
                 "name": google_user.get("name", ""),
                 "auth_provider": "google",
                 "google_id": google_user["google_id"],
                 "avatar_url": google_user.get("avatar_url"),
+                "email_verified": bool(google_user.get("email_verified", True)),
                 "role": "user",
             })
             user = await factory.user_repo.get_by_id(user_id)
@@ -289,6 +327,9 @@ async def google_auth(body: GoogleAuthRequest, request: Request):
                 "resource_id": user_id,
                 "details": {"email": google_user["email"], "auth_provider": "google"},
             })
+
+    if not user or not user.get("is_active", True):
+        raise HTTPException(status_code=401, detail="User account deactivated")
 
     # Update last login
     await factory.user_repo.update_user(user["id"], {
@@ -332,6 +373,10 @@ async def refresh_token(body: RefreshRequest, request: Request):
     Refresh tokens are single-use — a new pair is issued each time.
     """
     factory = _get_factory(request)
+    # Rate limit: refresh does a hash + DB lookup per attempt — cap it
+    client_id = get_client_identifier(request)
+    check_rate_limit(client_id, "auth")
+    await check_shared_rate_limit(client_id, group="auth")
 
     # Verify the refresh JWT
     try:
@@ -375,17 +420,36 @@ async def refresh_token(body: RefreshRequest, request: Request):
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
-    """Revoke all refresh tokens for the user (logout everywhere)."""
+    """Revoke all refresh tokens for the user (logout everywhere) and the
+    presented access token itself, so it stops working immediately."""
     factory = _get_factory(request)
 
     count = await factory.refresh_token_repo.revoke_all_for_user(user.user_id)
+
+    # Denylist the presented access token's jti until its natural expiry.
+    denylist = getattr(factory, "token_denylist_repo", None)
+    auth_header = request.headers.get("authorization") or ""
+    if denylist is not None and auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+        try:
+            claims = jwt_manager.verify_access_token(token)
+            expires_at = datetime.fromtimestamp(claims["exp"], tz=timezone.utc)
+            await denylist.revoke_jti(claims.get("jti") or "", expires_at)
+        except Exception:
+            logger.warning("Could not denylist access token on logout", exc_info=True)
+
+    # Opportunistic purge keeps the denylist small without a cron.
+    try:
+        await denylist.purge_expired()
+    except Exception:
+        pass
 
     await factory.audit_repo.log_event({
         "event_type": "USER_LOGOUT",
         "actor_id": user.user_id,
         "actor_type": "USER",
         "resource_id": user.user_id,
-        "details": {"tokens_revoked": count},
+        "details": {"tokens_revoked": count, "access_token_revoked": True},
     })
 
 
@@ -443,6 +507,7 @@ async def change_password(
 
     # Rate limit
     check_rate_limit(f"user:{user.user_id}", "auth")
+    await check_shared_rate_limit(f"user:{user.user_id}", group="auth")
 
     # Get user with password hash
     user_data = await factory.user_repo.get_by_id(user.user_id)
@@ -456,7 +521,7 @@ async def change_password(
         )
 
     # Verify current password
-    if not verify_password(body.current_password, user_data["password_hash"]):
+    if not await _password_work(verify_password, body.current_password, user_data["password_hash"]):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
 
     # Validate new password
@@ -465,7 +530,7 @@ async def change_password(
         raise HTTPException(status_code=400, detail=error)
 
     # Update
-    new_hash = hash_password(body.new_password)
+    new_hash = await _password_work(hash_password, body.new_password)
     await factory.user_repo.update_user(user.user_id, {"password_hash": new_hash})
 
     # Revoke all refresh tokens (force re-login everywhere)
@@ -494,6 +559,7 @@ async def create_guest_session(request: Request):
     # Rate limit (tighter for guest creation)
     client_id = get_client_identifier(request)
     check_rate_limit(client_id, "auth")
+    await check_shared_rate_limit(client_id, group="auth")
     
     guest_id = str(uuid.uuid4())
     guest_email = f"guest-{guest_id[:8]}@agentos.local"
@@ -502,7 +568,7 @@ async def create_guest_session(request: Request):
     # Guests authenticate only via the issued JWT. Low-cost hash keeps Get Started fast.
     guest_hash = bcrypt.hashpw(os.urandom(16), bcrypt.gensalt(rounds=4)).decode("utf-8")
 
-    await factory.user_repo.create_user({
+    await _create_account(factory, {
         "id": guest_id,
         "email": guest_email,
         "name": guest_name,
@@ -540,3 +606,80 @@ async def create_guest_session(request: Request):
         expires_in=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         user=UserPublic.from_db(user_data),
     )
+
+# ══════════════════════════════════════════════════════════════════
+#  API KEYS (programmatic access — the stable alternative to
+#  15-minute JWTs for MCP clients and automations)
+# ══════════════════════════════════════════════════════════════════
+
+class CreateApiKeyRequest(BaseModel):
+    name: str = ""
+
+
+@router.post("/api-keys", status_code=status.HTTP_201_CREATED)
+async def create_api_key(
+    body: CreateApiKeyRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Create an API key. The raw key is returned ONCE — only its hash is stored."""
+    factory = _get_factory(request)
+    keys_repo = getattr(factory, "api_keys_repo", None)
+    if keys_repo is None:
+        raise HTTPException(status_code=501, detail="API keys are not available on this deployment")
+
+    check_rate_limit(f"user:{user.user_id}", "auth")
+    await check_shared_rate_limit(f"user:{user.user_id}", group="auth")
+    import secrets as _secrets
+    raw_key = "vry_" + _secrets.token_urlsafe(24)
+    key_hash = __import__("hashlib").sha256(raw_key.encode("utf-8")).hexdigest()
+    try:
+        name = sanitize_text(body.name or "default", "name", max_length=100)
+    except InputValidationError as e:
+        raise HTTPException(status_code=400, detail=e.message)
+
+    key_id = await keys_repo.create_key(user.user_id, key_hash, raw_key[:8], name)
+    await factory.audit_repo.log_event({
+        "event_type": "API_KEY_CREATED",
+        "actor_id": user.user_id, "actor_type": "USER",
+        "resource_id": key_id,
+        "details": {"name": name, "prefix": raw_key[:8]},
+    })
+    return {
+        "id": key_id,
+        "name": name,
+        "key": raw_key,
+        "prefix": raw_key[:8],
+        "warning": "Store this key now — it is never shown again.",
+    }
+
+
+@router.get("/api-keys")
+async def list_api_keys(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
+    """List the caller's API keys — metadata only, never the raw key or hash."""
+    factory = _get_factory(request)
+    keys_repo = getattr(factory, "api_keys_repo", None)
+    if keys_repo is None:
+        raise HTTPException(status_code=501, detail="API keys are not available on this deployment")
+    keys = await keys_repo.list_keys(user.user_id)
+    return {"keys": keys, "count": len(keys)}
+
+
+@router.delete("/api-keys/{key_id}", status_code=status.HTTP_200_OK)
+async def revoke_api_key(key_id: str, request: Request, user: AuthenticatedUser = Depends(get_current_user)):
+    """Revoke one API key. Takes effect immediately on the next request."""
+    factory = _get_factory(request)
+    keys_repo = getattr(factory, "api_keys_repo", None)
+    if keys_repo is None:
+        raise HTTPException(status_code=501, detail="API keys are not available on this deployment")
+    revoked = await keys_repo.revoke_key(user.user_id, key_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="API key not found or already revoked")
+    await factory.audit_repo.log_event({
+        "event_type": "API_KEY_REVOKED",
+        "actor_id": user.user_id, "actor_type": "USER",
+        "resource_id": key_id,
+        "details": {},
+    })
+    return {"id": key_id, "revoked": True}
+

@@ -29,6 +29,12 @@ resource "google_project_iam_member" "api_log_writer" {
   member  = "serviceAccount:${google_service_account.api_sa.email}"
 }
 
+resource "google_project_iam_member" "api_vertex_user" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.api_sa.email}"
+}
+
 # Worker Service Account
 resource "google_service_account" "worker_sa" {
   account_id   = "agentos-worker-sa"
@@ -63,6 +69,18 @@ resource "google_project_iam_member" "worker_metric_writer" {
 resource "google_project_iam_member" "worker_log_writer" {
   project = var.project_id
   role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.worker_sa.email}"
+}
+
+resource "google_project_iam_member" "worker_vertex_user" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.worker_sa.email}"
+}
+
+resource "google_project_iam_member" "worker_pubsub_publisher" {
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
   member  = "serviceAccount:${google_service_account.worker_sa.email}"
 }
 

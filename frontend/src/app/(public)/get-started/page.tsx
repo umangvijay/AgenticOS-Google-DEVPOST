@@ -12,7 +12,7 @@ export default function GetStartedPage() {
   const started = useRef(false);
 
   useEffect(() => {
-    document.title = "Get started · AgentOS";
+    document.title = "Get started · Sandtable";
   }, []);
 
   useEffect(() => {
@@ -44,7 +44,8 @@ export default function GetStartedPage() {
 
   return (
     <div className="mesh-gradient" style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-      <div className="glass-panel animate-fade-in-up" style={{ textAlign: "center", maxWidth: 440, padding: 40 }}>
+      <div data-scroll-reveal className="glass-panel console-frame animate-fade-in-up" style={{ textAlign: "center", maxWidth: 440, padding: 40 }}>
+        <span className="frame-tr" aria-hidden /><span className="frame-bl" aria-hidden />
         {error ? (
           <div>
             <h2 style={{ fontSize: 24, fontWeight: 700, marginBottom: 8 }}>Could not open workspace</h2>
@@ -60,7 +61,7 @@ export default function GetStartedPage() {
         ) : (
           <div>
             <div style={{ margin: "0 auto 24px", width: 44, height: 44, borderRadius: "50%", border: "3px solid var(--border-primary)", borderTopColor: "var(--accent)", animation: "spin 1s linear infinite" }} />
-            <h2 style={{ fontSize: 24, fontWeight: 700 }}>Get Started</h2>
+            <h2 style={{ fontFamily: "var(--font-serif)", fontWeight: 500, letterSpacing: "-.02em", fontSize: 26 }}>Get Started</h2>
             <p style={{ color: "var(--text-secondary)", marginTop: 8 }}>Opening your workspace. The first load can take up to 45 seconds if Cloud Run is waking from zero.</p>
             <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap", marginTop: 24 }}>
               <Link href="/login" className="btn btn-secondary">Sign in</Link>

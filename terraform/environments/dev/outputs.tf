@@ -2,8 +2,8 @@ output "api_service_url" {
   value = module.cloud_run_api.service_url
 }
 
-output "worker_service_url" {
-  value = module.cloud_run_worker.service_url
+output "worker_pool_id" {
+  value = google_cloud_run_v2_worker_pool.worker.id
 }
 
 output "pubsub_workflow_events_topic" {

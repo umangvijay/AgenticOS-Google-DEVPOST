@@ -2,14 +2,18 @@ resource "google_cloud_run_v2_service" "default" {
   name     = var.service_name
   location = var.region
   project  = var.project_id
-  
+
+  # Phase 3 §3.18: explicit ingress so the default *.run.app URL cannot
+  # silently bypass a load-balancer-fronting Cloud Armor policy.
+  ingress = var.ingress
+
   template {
     service_account = var.service_account
     timeout         = "${var.timeout_seconds}s"
-    
+
     containers {
       image = var.image
-      
+
       dynamic "env" {
         for_each = var.environment_vars
         content {
@@ -17,7 +21,7 @@ resource "google_cloud_run_v2_service" "default" {
           value = env.value
         }
       }
-      
+
       dynamic "env" {
         for_each = var.secrets
         content {
@@ -25,18 +29,18 @@ resource "google_cloud_run_v2_service" "default" {
           value_source {
             secret_key_ref {
               secret  = element(split("/", env.value), 3) # Extracts secret name from full ID
-              version = "latest" # or specific version if needed
+              version = "latest"                          # or specific version if needed
             }
           }
         }
       }
     }
-    
+
     scaling {
       min_instance_count = var.min_instances
       max_instance_count = var.max_instances
     }
-    
+
     max_instance_request_concurrency = var.concurrency
   }
 }
@@ -53,7 +57,7 @@ data "google_iam_policy" "noauth" {
 
 data "google_iam_policy" "auth" {
   binding {
-    role = "roles/run.invoker"
+    role    = "roles/run.invoker"
     members = [for email in var.invoker_sa_emails : "serviceAccount:${email}"]
   }
 }

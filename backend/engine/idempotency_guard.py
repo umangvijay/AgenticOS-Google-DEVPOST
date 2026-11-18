@@ -1,7 +1,7 @@
 """
 AgentOS — Idempotency Guard
 
-Exactly-once execution wrapper for the ToolRouter.
+Execution deduplication wrapper for the ToolRouter.
 SHA-256 deterministic key: hash(workflow_id + task_id + tool_name + sorted(arguments)).
 
 Usage:
@@ -12,6 +12,7 @@ Usage:
 import json
 import hashlib
 import logging
+import asyncio
 from typing import Optional, Dict, Any, Callable, Awaitable
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ class IdempotencyResult:
 
 class IdempotencyGuard:
     """
-    Wraps tool execution with exactly-once semantics.
+    Deduplicates tool execution; uncertain remote effects require reconciliation.
 
     Flow:
     1. Compute deterministic key from (workflow_id, task_id, tool_name, arguments)
@@ -69,9 +70,10 @@ class IdempotencyGuard:
         tool_name: str,
         arguments: Dict[str, Any],
         execute_fn: Callable[..., Awaitable[Dict[str, Any]]],
+        retry_safe: bool = False,
     ) -> IdempotencyResult:
         """
-        Execute a tool call with exactly-once semantics.
+        Execute a tool call once per ledger claim.
 
         Args:
             workflow_id: The workflow this task belongs to
@@ -89,34 +91,37 @@ class IdempotencyGuard:
         claimed = await self.repo.atomic_insert(key, workflow_id, task_id)
 
         if claimed:
-            # We own the lock — execute
+            async def quarantine():
+                try:
+                    await self.repo.commit_uncertain(key)
+                except Exception:
+                    # Retain the original running lock on a store outage. Never release it for replay.
+                    logger.exception("Could not persist uncertain execution %s", key[:12])
+
             try:
                 result = await execute_fn()
-                # Commit success with cached result
-                result_json = json.dumps(result) if result else "{}"
-                await self.repo.commit_success(key, result_json)
-                logger.info(
-                    f"[IDEMPOTENCY] Executed and committed: {tool_name} "
-                    f"(key={key[:12]}...)"
-                )
-                return IdempotencyResult(executed=True, result=result)
-
-            except Exception as e:
-                # Challenge pause must not be recorded as a failed execution lock.
+            except asyncio.CancelledError:
+                await asyncio.shield(quarantine())
+                raise
+            except Exception as exc:
                 from backend.services.auth_challenges import ChallengePause
                 from backend.services.approvals_engine import ApprovalRequiredException
-                if isinstance(e, (ChallengePause, ApprovalRequiredException)):
-                    try:
-                        await self.repo.commit_failure(key)
-                    except Exception:
-                        pass
-                    raise
-                await self.repo.commit_failure(key)
-                logger.error(
-                    f"[IDEMPOTENCY] Execution failed, lock released: {tool_name} "
-                    f"(key={key[:12]}...) — {e}"
-                )
-                raise  # Re-raise so the engine/recovery can handle it
+                if isinstance(exc, (ChallengePause, ApprovalRequiredException)):
+                    await self.repo.commit_pause(key)
+                elif retry_safe:
+                    await self.repo.commit_failure(key)
+                else:
+                    await quarantine()
+                raise
+
+            # An external success followed by a ledger failure is NOT an execution failure.
+            try:
+                await self.repo.commit_success(key, json.dumps(result) if result is not None else "null")
+            except Exception:
+                await quarantine()
+                return IdempotencyResult(executed=True, blocked=True,
+                    reason="External outcome uncertain: result could not be committed; reconcile before retry")
+            return IdempotencyResult(executed=True, result=result)
 
         else:
             # Key already exists — check status
@@ -155,8 +160,12 @@ class IdempotencyGuard:
                 )
                 return IdempotencyResult(
                     executed=False, blocked=True,
-                    reason="Another worker is executing this task"
+                    reason="Execution is running or interrupted; reconcile an expired execution before retry"
                 )
+
+            elif status == "uncertain":
+                return IdempotencyResult(executed=False, blocked=True,
+                    reason="External outcome uncertain; reconcile with the provider before retry")
 
             elif status == "failed":
                 # Previous attempt failed — needs retry with different key
@@ -166,7 +175,7 @@ class IdempotencyGuard:
                 )
                 return IdempotencyResult(
                     executed=False, blocked=True,
-                    reason="Previous execution failed — retry with modified input"
+                    reason="Previous execution failed — use the workflow Retry action"
                 )
 
             else:

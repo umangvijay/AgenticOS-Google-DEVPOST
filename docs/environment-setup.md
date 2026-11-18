@@ -11,6 +11,14 @@ pip install -r requirements.txt
 playwright install chromium
 cp .env.example .env
 # Edit .env: GEMINI_API_KEY=...
+# Or use Groq for planner/orchestrator and shared text/JSON calls:
+# LLM_PROVIDER=groq
+# GROQ_API_KEY=...
+# GROQ_MODEL=openai/gpt-oss-20b
+# Or use Hugging Face Inference Providers (OpenAI-compatible router):
+# LLM_PROVIDER=huggingface
+# HF_TOKEN=...
+# HF_MODEL=openai/gpt-oss-120b
 # Optional: CONTACT_SMTP_PASSWORD=16-char Gmail App Password (not your mailbox password)
 .venv/bin/python main.py
 ```
@@ -33,6 +41,7 @@ If those ports are already serving AgentOS, leave them running.
 - File lives next to `README.md`. FastAPI and Next.js both read it.
 - Never commit it (`.gitignore`).
 - `CONTACT_SMTP_PASSWORD` must be a [Gmail App Password](https://myaccount.google.com/apppasswords), not the Google account password.
+- `LLM_PROVIDER=auto` prefers Gemini, Vertex, Groq, then Hugging Face. Set `LLM_PROVIDER=groq` or `LLM_PROVIDER=huggingface` to route Google ADK planner/orchestrator calls through that OpenAI-compatible provider. Hugging Face uses `HF_TOKEN` and the hosted Inference Providers router; no model files need to be copied into this repository. `GROQ_API_KEY` is distinct from xAI's `XAI_API_KEY`.
 - `GET /api/v1/contact/status` reports `smtp_configured` without returning the secret.
 
 ## Google Cloud (optional)

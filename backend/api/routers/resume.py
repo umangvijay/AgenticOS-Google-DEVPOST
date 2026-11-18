@@ -1,11 +1,12 @@
 import logging
+import asyncio
 from typing import Dict, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel
 
 from backend.api.dependencies.auth import get_current_user, AuthenticatedUser, require_not_viewer
-from backend.security.rate_limiter import check_rate_limit
+from backend.security.rate_limiter import check_rate_limit, check_shared_rate_limit
 from backend.models.resume import Resume
 from backend.services.jd_parser_service import JDParserService
 from backend.services.ats_analyzer_service import ATSAnalyzerService
@@ -13,7 +14,14 @@ from backend.services.resume_tailor_service import ResumeTailorService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/resume", tags=["resume"])
+async def _resume_context(request: Request, user: AuthenticatedUser = Depends(require_not_viewer)):
+    from backend.services.llm_context import load_user_llm_keys, load_user_model
+    factory = request.app.state.factory
+    await load_user_llm_keys(factory.secrets_repo, user.user_id)
+    await load_user_model(factory.settings_repo, user.user_id)
+
+
+router = APIRouter(prefix="/resume", tags=["resume"], dependencies=[Depends(_resume_context)])
 
 class AnalyzeRequest(BaseModel):
     master_resume: Dict[str, Any]
@@ -38,12 +46,16 @@ async def scan_resume(
     Parse a PDF resume and analyze it against a job description using Gemini.
     """
     check_rate_limit(f"user:{user.user_id}", "resume_analyze")
-    
+    # Phase 3 §3.10: resume work is enforced shared across replicas (the
+    # resume_analyze/resume_tailor aliases resolve to resume_generate).
+    await check_shared_rate_limit(f"user:{user.user_id}", group="resume_analyze")
+
     try:
-        # Extract text from PDF
+        # Extract text from PDF (filename may be absent — don't crash on it)
         text = ""
         content = await file.read()
-        if file.filename.endswith('.pdf'):
+        filename = (file.filename or "").lower()
+        if filename.endswith(".pdf") or content[:4] == b"%PDF":
             with pdfplumber.open(io.BytesIO(content)) as pdf:
                 for page in pdf.pages:
                     extracted = page.extract_text()
@@ -51,11 +63,13 @@ async def scan_resume(
                         text += extracted + "\n"
         else:
             text = content.decode('utf-8')
-            
+
         if not text.strip():
             raise HTTPException(status_code=400, detail="Could not extract text from the file.")
-            
+
         # Analyze with Gemini (Flash fallbacks + Vertex region from settings).
+        # The analyzer is intermittently flaky upstream (audit R2.6.3), so
+        # transient model errors get one internal retry before surfacing.
         from backend.services import gemini_client
 
         prompt = f"""
@@ -76,15 +90,43 @@ Provide your analysis in JSON format with exactly these keys:
 
 Output ONLY valid JSON.
 """
-        result = await gemini_client.generate_json(prompt)
+        last_error: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                result = await gemini_client.generate_json(prompt)
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt == 0 and gemini_client.is_retryable_model_error(exc):
+                    logger.warning("ATS scan model call failed transiently (%s); retrying once", exc)
+                    await asyncio.sleep(1.0)
+                    continue
+                raise
         if not isinstance(result, dict):
             raise HTTPException(status_code=500, detail="Resume analysis returned an unexpected payload.")
         result["extracted_text"] = text[:20000]
         return result
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error scanning resume: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Error scanning resume")
+        detail = str(e)
+        from backend.services.gemini_client import GeminiQuotaExceeded, is_quota_error
+        if isinstance(e, GeminiQuotaExceeded) or is_quota_error(e):
+            raise HTTPException(
+                status_code=429,
+                detail="The model quota is exhausted for resume analysis. Add a key in Settings and retry.",
+            )
+        if isinstance(e, (ValueError, KeyError)) or "pdf" in detail.lower() or "decode" in detail.lower():
+            raise HTTPException(
+                status_code=400,
+                detail="Could not read the resume file. Upload a text-based PDF or plain text.",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail="Resume analysis failed upstream. Please retry; if it persists, check model configuration.",
+        )
 
 class CreateResumeRequest(BaseModel):
     profile_text: str
@@ -99,12 +141,47 @@ async def create_resume(
 ):
     """Build an ATS-ready resume from free-form text; optionally score/tailor against a JD."""
     check_rate_limit(f"user:{user.user_id}", "resume_analyze")
+    # Phase 3 §3.10: resume work is enforced shared across replicas (the
+    # resume_analyze/resume_tailor aliases resolve to resume_generate).
+    await check_shared_rate_limit(f"user:{user.user_id}", group="resume_analyze")
     try:
         from backend.services.resume_builder import create_and_score
-        return await create_and_score(body.profile_text, body.job_description, tailor=body.tailor)
+        result = await create_and_score(body.profile_text, body.job_description, tailor=body.tailor)
+        # §17.6/§17.7/§17.9 (review gap): the generated HTML records the
+        # durable deliverable — staged publication + typed verification —
+        # and the payload carries the delivery for the evidence panel.
+        try:
+            import tempfile as _tempfile
+            from pathlib import Path as _Path
+            from backend.services.artifact_builder import (
+                record_and_publish_deliverable,
+            )
+            _dest = _Path(_tempfile.mkdtemp(prefix="dlv-"))
+            _html = result.get("html") or ""
+            _path = _dest / "resume.html"
+            _path.write_text(_html, encoding="utf-8")
+            delivery = await record_and_publish_deliverable(
+                owner_user_id=user.user_id,
+                tenant_id=str(getattr(user, "organization_id", None)
+                              or user.user_id),
+                deliverable_type="resume_html",
+                name="tailored-resume",
+                dest=_dest, written=["resume.html"],
+                lineage={"generator_version": "resume_router",
+                         "tailored": bool(body.tailor)})
+            result["delivery"] = {
+                "deliverable_id": delivery["deliverable_id"],
+                "revision": delivery["revision"],
+                "verification": delivery["verification"],
+            }
+        except Exception:
+            logger.warning("Deliverable recording failed; the resume "
+                           "result is returned without the delivery "
+                           "payload", exc_info=True)
+        return result
     except Exception as e:
         logger.error(f"Error creating resume: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Resume processing failed. Check the submitted data and model configuration.")
 
 
 @router.post("/analyze", status_code=status.HTTP_200_OK)
@@ -117,18 +194,21 @@ async def analyze_resume(
     Provides deterministic scoring and gap analysis.
     """
     check_rate_limit(f"user:{user.user_id}", "resume_analyze")
+    # Phase 3 §3.10: resume work is enforced shared across replicas (the
+    # resume_analyze/resume_tailor aliases resolve to resume_generate).
+    await check_shared_rate_limit(f"user:{user.user_id}", group="resume_analyze")
     
     try:
         resume = Resume.model_validate(body.master_resume)
         jd_parser = JDParserService()
-        jd = jd_parser.parse_job_description(body.job_description)
+        jd = await jd_parser.parse_job_description(body.job_description)
         
         analyzer = ATSAnalyzerService()
         score = analyzer.analyze(resume, jd)
         return score.model_dump()
     except Exception as e:
         logger.error(f"Error analyzing resume: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Resume processing failed. Check the submitted data and model configuration.")
 
 @router.post("/tailor", status_code=status.HTTP_200_OK)
 async def tailor_resume(
@@ -140,14 +220,15 @@ async def tailor_resume(
     Does NOT invent facts.
     """
     check_rate_limit(f"user:{user.user_id}", "resume_tailor")
+    await check_shared_rate_limit(f"user:{user.user_id}", group="resume_tailor")
     
     try:
         resume = Resume.model_validate(body.master_resume)
         jd_parser = JDParserService()
-        jd = jd_parser.parse_job_description(body.job_description)
+        jd = await jd_parser.parse_job_description(body.job_description)
         
         tailor_service = ResumeTailorService()
-        tailored = tailor_service.tailor(resume, jd, body.target_job_id)
+        tailored = await tailor_service.tailor(resume, jd, body.target_job_id)
         
         return {
             "status": "success",
@@ -155,7 +236,7 @@ async def tailor_resume(
         }
     except Exception as e:
         logger.error(f"Error tailoring resume: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Resume processing failed. Check the submitted data and model configuration.")
 
 
 class RenderRequest(BaseModel):
@@ -170,6 +251,9 @@ async def render_resume(
 ):
     """Render a structured resume to HTML (and PDF when WeasyPrint is available)."""
     check_rate_limit(f"user:{user.user_id}", "resume_analyze")
+    # Phase 3 §3.10: resume work is enforced shared across replicas (the
+    # resume_analyze/resume_tailor aliases resolve to resume_generate).
+    await check_shared_rate_limit(f"user:{user.user_id}", group="resume_analyze")
     try:
         resume = Resume.model_validate(body.resume)
         from backend.services.resume_renderer import ResumeRendererService
@@ -186,4 +270,4 @@ async def render_resume(
         return {"html": html}
     except Exception as e:
         logger.error("Error rendering resume: %s", e)
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Resume processing failed. Check the submitted data and model configuration.")

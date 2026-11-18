@@ -44,7 +44,7 @@ If your goal is to check the health of a URL, the backend skips the Gemini plann
 
 ## Settings and safety
 
-In Settings, set autonomy 0–3. Semi-autonomous (2) auto-runs low/medium risk tools and asks you before high-risk ones. See [SECURITY.md](SECURITY.md) for bcrypt, vault encryption, CSRF, SSRF, Gmail App Passwords, and HITL.
+In Settings, set autonomy 0–3. Semi-autonomous (2) auto-runs low/medium risk tools and asks you before high-risk ones. See [SECURITY.md](SECURITY.md) for Argon2id password hashing, vault encryption, CSRF, SSRF, Gmail App Passwords, and HITL.
 
 ## Contact
 

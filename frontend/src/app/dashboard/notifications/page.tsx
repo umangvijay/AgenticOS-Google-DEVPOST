@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { listNotifications, markNotificationRead, markAllNotificationsRead, Notification } from "@/lib/api";
 
 export default function NotificationsPage() {
@@ -9,7 +9,7 @@ export default function NotificationsPage() {
   const [error, setError] = useState("");
   const [unreadOnly, setUnreadOnly] = useState(false);
 
-  async function load() {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const data = await listNotifications(unreadOnly, 50);
@@ -19,11 +19,13 @@ export default function NotificationsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [unreadOnly]);
 
   useEffect(() => {
+    // The load function commits data only after its asynchronous request completes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
-  }, [unreadOnly]);
+  }, [load]);
 
   const handleMarkRead = async (id: string) => {
     try {
@@ -44,7 +46,7 @@ export default function NotificationsPage() {
   };
 
   return (
-    <div className="animate-fade-in" style={{ maxWidth: 800, margin: "0 auto" }}>
+    <div className="animate-fade-in" data-scroll-reveal style={{ maxWidth: 800, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 32 }}>
         <div>
           <h1 style={{ fontSize: 24, fontWeight: 700 }}>Notifications</h1>

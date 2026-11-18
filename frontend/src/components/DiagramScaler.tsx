@@ -7,6 +7,8 @@ export function DiagramScaler({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    // This flag deliberately switches from the server-safe fallback to measured layout.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
     const updateScale = () => {
       if (containerRef.current) {

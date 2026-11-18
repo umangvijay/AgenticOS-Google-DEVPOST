@@ -24,28 +24,28 @@ variable "service_account" {
 }
 
 variable "min_instances" {
-  type        = number
-  default     = 0
+  type    = number
+  default = 0
 }
 
 variable "max_instances" {
-  type        = number
-  default     = 10
+  type    = number
+  default = 10
 }
 
 variable "timeout_seconds" {
-  type        = number
-  default     = 300
+  type    = number
+  default = 300
 }
 
 variable "concurrency" {
-  type        = number
-  default     = 80
+  type    = number
+  default = 80
 }
 
 variable "environment_vars" {
-  type        = map(string)
-  default     = {}
+  type    = map(string)
+  default = {}
 }
 
 variable "secrets" {
@@ -58,6 +58,17 @@ variable "is_public" {
   type        = bool
   description = "Whether the service allows unauthenticated invocations"
   default     = false
+}
+
+variable "ingress" {
+  type        = string
+  description = "Cloud Run ingress setting. Phase 3 §3.18: when Cloud Armor protects a load balancer in front of this service, set INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER so the default *.run.app serverless URL cannot bypass the edge. Preserve INGRESS_TRAFFIC_ALL only where direct serverless access is required."
+  default     = "INGRESS_TRAFFIC_ALL"
+
+  validation {
+    condition     = contains(["INGRESS_TRAFFIC_ALL", "INGRESS_TRAFFIC_INTERNAL_ONLY", "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"], var.ingress)
+    error_message = "ingress must be one of the google_cloud_run_v2_service ingress settings."
+  }
 }
 
 variable "invoker_sa_emails" {

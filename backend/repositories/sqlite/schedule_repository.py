@@ -6,6 +6,7 @@ Schedule CRUD with execution history tracking and idempotent trigger detection.
 
 import json
 import logging
+import time
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 
@@ -27,14 +28,18 @@ class SQLiteScheduleRepository(BaseScheduleRepository):
             """
             INSERT INTO schedules (
                 schedule_id, user_id, name, goal, cron_expression, schedule_type,
-                timezone, status, next_run_at, last_run_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                timezone, missed_run_policy, status, next_run_at, next_run_local,
+                last_run_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 s["schedule_id"], s["user_id"], s["name"], s["goal"],
                 s.get("cron_expression"), s.get("schedule_type", "one_time"),
-                s.get("timezone", "UTC"), s.get("status", "active"),
-                s.get("next_run_at"), s.get("last_run_at"),
+                s.get("timezone", "UTC"),
+                s.get("missed_run_policy", "coalesce_one"),
+                s.get("status", "active"),
+                s.get("next_run_at"), s.get("next_run_local"),
+                s.get("last_run_at"),
                 s.get("created_at", now), now,
             ),
         )
@@ -109,6 +114,60 @@ class SQLiteScheduleRepository(BaseScheduleRepository):
             (now, now, schedule_id),
         )
         await conn.commit()
+
+    async def claim_occurrence(self, schedule_id: str, occurrence: str,
+                               run_id: str) -> bool:
+        """Phase 3 §3.15: atomic occurrence claim. The PRIMARY KEY on
+        (schedule_id, occurrence) makes the INSERT the admission decision —
+        two workers racing the same trigger resolve exactly one winner. The
+        loser observes claim_occurrence=False and records SKIPPED_BUSY."""
+        try:
+            await self.db.execute(
+                """
+                INSERT INTO schedule_occurrences
+                    (schedule_id, occurrence, run_id, status, claimed_at)
+                VALUES (?, ?, ?, 'claimed', ?)
+                """,
+                (schedule_id, occurrence, run_id, int(time.time())),
+            )
+            await self.db.commit()
+            return True
+        except Exception:
+            await self.db.commit()
+            return False
+
+    async def finish_occurrence(self, schedule_id: str, occurrence: str,
+                                status: str) -> None:
+        await self.db.execute(
+            "UPDATE schedule_occurrences SET status=? "
+            "WHERE schedule_id=? AND occurrence=?",
+            (status, schedule_id, occurrence),
+        )
+        await self.db.commit()
+
+    async def find_stale_occurrence_claims(self, older_than_epoch: int,
+                                           limit: int = 50):
+        """Phase 4 §4.16: claims with no terminal outcome and no run
+        materialized within the horizon — a process died between claim and
+        run creation. The reconciler releases them for re-claim."""
+        cursor = await self.db.execute(
+            """
+            SELECT so.schedule_id, so.occurrence FROM schedule_occurrences so
+            WHERE so.status='claimed' AND so.claimed_at<=?
+              AND NOT EXISTS (
+                SELECT 1 FROM workflow_runs wr WHERE wr.run_id = so.run_id)
+            LIMIT ?
+            """, (older_than_iso, limit))
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def release_occurrence(self, schedule_id: str, occurrence: str) -> bool:
+        """Drop a claim so redelivery may re-claim (§3.15 recovery path)."""
+        cursor = await self.db.execute(
+            "DELETE FROM schedule_occurrences WHERE schedule_id=? AND occurrence=?",
+            (schedule_id, occurrence),
+        )
+        await self.db.commit()
+        return bool(cursor.rowcount)
 
     async def get_execution_history(self, schedule_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         rows = await self.db.fetch_all(

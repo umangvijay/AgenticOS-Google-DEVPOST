@@ -1,40 +1,60 @@
-# MCP tool creation
+# MCP and connector creation
 
-If AgentOS does not already have tools for an application, it **creates them**, tests them, registers them, and then uses them.
+AgentOS can create candidate tool definitions from OpenAPI, API descriptions,
+and supported website workflows. A URL or a registered manifest does not prove
+working authenticated access. See [roadmap phases 04–09](full-stack-roadmap.md).
 
-## How it works
+## Products
 
-1. You provide an OpenAPI spec, an API docs URL, a natural-language description of an HTTP API, or a **website URL** with no public API.
-2. The planner picks a factory method:
-   - **`url`** — fetch OpenAPI/Swagger (SSRF-safe).
-   - **`prompt`** — sketch or generate a small OpenAPI against a public HTTPS host (GitHub, Open-Meteo, PokeAPI, JSONPlaceholder, …).
-   - **`website`** — plan Playwright tools on one origin. No hidden REST API is invented.
-3. The factory generates tool schemas, probes a safe GET when the path is HTTP, and registers the MCP in your catalog.
-4. Tools appear for every agent. Authenticated APIs attach a vault credential (`api_key` / token). Browser login uses `credential_name` from chat (`Log in with vault credential NAME`).
-5. The next task in the same run (or the next message in the thread) can call the new tools. Follow-ups score the catalog instead of always calling tool `[0]`.
+| Product | Current boundary |
+|---|---|
+| Declarative API adapter | Primary internal mapping/executor path; only validated permitted operations should execute |
+| Website workflow | Playwright automation with separate session, DOM, credential and action-policy requirements |
+| Standalone server | Packaging helpers exist; trusted isolated execution and content-bound protocol evidence remain gates |
 
-Payment APIs, CRMs, issue trackers, and internal HTTPS APIs all use the HTTP path. There is no per-vendor hardcoding beyond a few well-known public hosts used to sketch paths when you skip OpenAPI.
+## Lifecycle
 
-## In the product
+1. Resolve an existing permitted capability before creating a duplicate.
+2. Ingest a bounded source and preserve official/extracted/inferred provenance.
+3. Generate candidate operations and explicitly report omitted capabilities.
+4. Attach scoped credentials without placing secrets in definitions or prompts.
+5. Validate each supported operation against its revision and credential context.
+6. Activate only eligible operations through deterministic runtime policy.
+7. Execute with approval, budget, ownership, idempotency and runtime checks.
+8. Verify the result and deliver an authorized artifact or explicit unresolved state.
 
-- **Integrations → Create MCP** — OpenAPI URL, paste spec, website URL, or “I don’t see my app”. Poll live build logs.
-- **Workspace chat**
-  - OpenAPI: `Create MCP tools from https://…/openapi.json then list …`
-  - HTTP API without a spec: `Build MCP tools for [app] so I can [list / get / create …]`
-  - Website: vault login, then `Create MCP tools for https://…`, then `Log in with vault credential NAME and open home / use runOnSite`
+This is the target contract. The API dispatches builds through workflow work;
+the reviewed orchestrator path records metadata but still executes its build
+inline. A common record is not equivalent to a common durable execution boundary.
 
-Dashboard chips send the three live-safe examples (PokeAPI OpenAPI, GitHub events, example.com website).
+## Validation and evidence
 
-## Trust
+A passing read probe establishes only its tested operation and context. It does
+not verify every endpoint, authentication scheme, pagination or write operation.
+Pending-review and invalidated definitions must remain unavailable. Displayed
+coverage must use the same predicate as execution; the focused review found
+stale evidence could still count in the coverage helper.
 
-Specs from a URL start as `verified` when they parse cleanly. Prompt-generated specs are `pending_review`. Private/localhost/metadata hosts are blocked.
+Add tests for schema/parameter encoding, authorization denial, authenticated
+reads, pagination, empty results, malformed responses, timeouts and rate limits.
+Writes require controlled accounts/fixtures and appropriate action approval.
+Credential rotation or relevant definition changes invalidate affected evidence.
 
-## Websites without an API
+## Standalone execution
 
-Integrations → Create → **Website**, or chat `Create MCP tools for https://example.com`. The factory plans Playwright tools (`runOnSite`, `login`, `openHome`, …) locked to that origin. That is UI automation, not a hidden REST API.
+The legacy host tester deliberately returns unsupported. Packaging must use exact
+resolved dependencies and immutable executable-content digests. Actual protocol
+tests must run in the supported isolated runner and issue digest-bound evidence.
+Manually recorded passing status flags do not establish protocol interoperability.
+The reviewed deployment-status helper did not reject post-test content changes.
 
-CAPTCHA, OTP, and MFA pause the run for you. AgentOS does not fill them. Use Vault + **Resume after challenge** for real logins (for example a learner portal). Live E2E uses `example.com` so it never hits CAPTCHA.
+## User experience
 
-## After the build
+Build, credential attachment, validation and activation are distinct states.
+Provide a durable build link, reconnect/retest for partial success, operation
+coverage, provenance and unsupported-capability explanations. Stopping browser
+observation does not cancel backend work; cancellation needs an explicit command.
 
-`GET /api/v1/integrations` lists MCPs for the current user. Disable or delete from the Integrations UI. Circuit breakers open if a tool starts failing repeatedly.
+Browser tools need scoped hosts, action approvals, session ownership and tested
+DOM targeting. Authentication challenges require a human in the correct session.
+An inferred API or website description is never a guarantee of supported access.

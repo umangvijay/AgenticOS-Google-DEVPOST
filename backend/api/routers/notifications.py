@@ -12,9 +12,10 @@ import json
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Query, Request, Depends
 from fastapi.responses import StreamingResponse
 
+from backend.security.json_safety import safe_json_dumps
 from backend.api.dependencies.auth import get_current_user, AuthenticatedUser
 
 logger = logging.getLogger(__name__)
@@ -34,8 +35,8 @@ async def list_notifications(
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
     unread_only: bool = False,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ):
     """List notifications for the current user."""
     factory = _get_factory(request)
@@ -113,7 +114,7 @@ async def stream_notifications(
                     "unread_count": current_count,
                     "latest": notifications[:3],
                 }
-                yield f"event: notification\ndata: {json.dumps(payload)}\n\n"
+                yield f"event: notification\ndata: {safe_json_dumps(payload)}\n\n"
                 last_count = current_count
             else:
                 # Heartbeat to keep connection alive

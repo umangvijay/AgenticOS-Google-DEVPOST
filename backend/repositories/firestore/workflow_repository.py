@@ -136,6 +136,35 @@ class FirestoreWorkflowRepository(BaseWorkflowRepository):
                 return task
         return None
 
+    async def update_task_if_not_cancelled(self, run_id: str, task_id: str, updates: Dict[str, Any], *, expected_attempt=None) -> bool:
+        db = await self._get_db()
+        ref = db.collection("workflow_runs").document(run_id)
+
+        @firestore.async_transactional
+        async def complete(transaction):
+            data = (await ref.get(transaction=transaction)).to_dict()
+            if not data or data.get("status") == "CANCELLED":
+                return False
+            tasks = list(data.get("tasks") or [])
+            for index, task in enumerate(tasks):
+                if task.get("task_id") != task_id:
+                    continue
+                if task.get("status") == "CANCELLED":
+                    return False
+                if expected_attempt is not None:
+                    expiry = task.get("lease_expires_at")
+                    if isinstance(expiry, str):
+                        expiry = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+                    if (task.get("status") != "RUNNING" or task.get("attempt", 0) != expected_attempt
+                            or not isinstance(expiry, datetime) or expiry.tzinfo is None
+                            or expiry <= datetime.now(timezone.utc)):
+                        return False
+                tasks[index] = {**task, **updates, "task_id": task_id}
+                transaction.update(ref, {"tasks": tasks, "updated_at": datetime.now(timezone.utc).isoformat()})
+                return True
+            return False
+        return await complete(db.transaction())
+
     async def update_task(self, run_id: str, task_id, updates=None, pending_approval=None) -> None:
         """ABC: (run_id, task_id, updates). Also accepts a Task as the second argument."""
         if isinstance(task_id, Task):
@@ -166,6 +195,9 @@ class FirestoreWorkflowRepository(BaseWorkflowRepository):
             found = False
             for i, t in enumerate(tasks):
                 if isinstance(t, dict) and t.get("task_id") == task_id:
+                    if "attempt" in updates and int(updates["attempt"]) != int(t.get("attempt") or 0):
+                        from backend.models.exceptions import StaleTaskLeaseError
+                        raise StaleTaskLeaseError(f"Task {task_id} no longer belongs to this execution")
                     merged = dict(t)
                     merged.update(_as_dict(updates))
                     merged["task_id"] = task_id
@@ -213,10 +245,20 @@ class FirestoreWorkflowRepository(BaseWorkflowRepository):
             for i, t in enumerate(tasks):
                 if t.get("task_id") == task_id:
                     status = t.get("status")
-                    if status not in ["PENDING", "RETRYING", "WAITING"]:
+                    now = datetime.now(timezone.utc)
+                    expired = False
+                    if status == "RUNNING" and t.get("lease_expires_at"):
+                        expiry = t["lease_expires_at"]
+                        if isinstance(expiry, str):
+                            try:
+                                expiry = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+                            except ValueError:
+                                return False
+                        if isinstance(expiry, datetime) and expiry.tzinfo is not None:
+                            expired = expiry < now
+                    if status not in ["PENDING", "RETRYING", "WAITING"] and not expired:
                         return False
 
-                    now = datetime.now(timezone.utc)
                     t["status"] = "RUNNING"
                     t["lease_started_at"] = now.isoformat()
                     t["lease_expires_at"] = (now + timedelta(seconds=lease_seconds)).isoformat()
@@ -349,3 +391,14 @@ class FirestoreWorkflowRepository(BaseWorkflowRepository):
 
         transaction = db.transaction()
         return await resolve_in_transaction(transaction, doc_ref)
+
+    async def purge_old_events(self, days: int) -> int:
+        """Retention control: delete timeline events older than N days (runs kept)."""
+        from datetime import datetime, timedelta, timezone as tz
+        db = await self._get_db()
+        cutoff = (datetime.now(tz.utc) - timedelta(days=int(days))).isoformat()
+        count = 0
+        async for doc in db.collection("events").where("timestamp", "<", cutoff).stream():
+            await doc.reference.delete()
+            count += 1
+        return count

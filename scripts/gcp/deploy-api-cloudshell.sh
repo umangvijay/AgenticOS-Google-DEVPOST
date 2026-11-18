@@ -45,7 +45,7 @@ gcloud run deploy "${SERVICE}" \
   --cpu=1 \
   --timeout=300 \
   --cpu-boost \
-  --set-env-vars="APP_ENV=production,STORAGE_BACKEND=firestore,GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GEMINI_MODEL=gemini-3.6-flash" \
+  --set-env-vars="APP_ENV=production,STORAGE_BACKEND=firestore,GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GEMINI_MODEL=gemini-3.8-flash,GEMINI_EMBEDDING_MODEL=gemini-embedding-001" \
   --set-secrets="SECRETS_MASTER_KEY=secrets-master-key:latest,JWT_PRIVATE_KEY=jwt-private-key:latest,JWT_PUBLIC_KEY=jwt-public-key:latest" \
   --quiet
 

@@ -142,6 +142,13 @@ class SQLiteUserRepository(BaseUserRepository):
         )
         await self.db.commit()
 
+    async def list_users(self) -> list:
+        rows = await self.db.fetch_all("SELECT * FROM users ORDER BY created_at DESC")
+        return [self._row_to_dict(r) for r in (rows or [])]
+
+    async def set_user_active(self, user_id: str, is_active: bool) -> bool:
+        return await self.update_user(user_id, {"is_active": bool(is_active)})
+
     async def delete_user(self, user_id: str) -> bool:
         conn = await self.db.connection()
         cursor = await conn.execute("DELETE FROM users WHERE id = ?", (user_id,))

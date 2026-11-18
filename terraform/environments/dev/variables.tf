@@ -23,14 +23,15 @@ variable "shared_env_vars" {
   type        = map(string)
   description = "Environment variables shared across both API and Worker"
   default = {
-    APP_ENV                  = "production"
-    LOG_LEVEL                = "INFO"
-    STORAGE_BACKEND          = "firestore"
-    GEMINI_MODEL             = "gemini-3.6-flash"
-    GEMINI_EMBEDDING_MODEL   = "gemini-embedding-2-preview"
-    CONTACT_TO_EMAIL         = "godumang35@gmail.com"
-    CONTACT_SMTP_HOST        = "smtp.gmail.com"
-    CONTACT_SMTP_PORT        = "587"
-    CONTACT_SMTP_USERNAME    = "godumang35@gmail.com"
+    APP_ENV                = "production"
+    LOG_LEVEL              = "INFO"
+    STORAGE_BACKEND        = "firestore"
+    GOOGLE_CLOUD_REGION    = "global"
+    GEMINI_MODEL           = "gemini-3.8-flash"
+    GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
+    CONTACT_TO_EMAIL       = "godumang35@gmail.com"
+    CONTACT_SMTP_HOST      = "smtp.gmail.com"
+    CONTACT_SMTP_PORT      = "587"
+    CONTACT_SMTP_USERNAME  = "godumang35@gmail.com"
   }
 }

@@ -16,6 +16,7 @@ class AuthProvider(str, Enum):
 
 
 class UserRole(str, Enum):
+    SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
     USER = "user"
     VIEWER = "viewer"

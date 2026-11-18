@@ -1,0 +1,283 @@
+# AgentOS local-first stack (Phase 20 §20.2).
+# Profiles: core | browser | runner | local-ai | emulators | observability
+# Start core:  docker compose --profile core up
+# Everything:  docker compose --profile core --profile browser --profile runner --profile emulators up
+name: agentos
+
+# §21.2/§21.3/§21.4: the core profile is the DURABLE multi-process
+# platform — Postgres storage + NATS transport across separate API and
+# worker processes. Override with STORAGE_BACKEND=sqlite to run the
+# single-process profile.
+x-backend-env: &backend-env
+  STORAGE_BACKEND: ${STORAGE_BACKEND:-postgres}
+  POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://agentos:agentos@postgres:5432/agentos_test}
+  MESSAGE_BUS_TRANSPORT: ${MESSAGE_BUS_TRANSPORT:-nats}
+  NATS_SERVERS: ${NATS_SERVERS:-nats://nats:4222}
+  SQLITE_DB_PATH: ${SQLITE_DB_PATH:-/data/agentos.db}
+  DATABASE_PATH: ${DATABASE_PATH:-/data/agentos.db}
+  # §7.19/§32.9: the trusted attestation issuer's HMAC key must be SHARED
+  # by every control-plane process — a build signed in one worker and an
+  # invocation verified in another fail under the development fallback's
+  # per-process ephemeral key. Value lives in .env — never committed;
+  # production refuses to boot without it (artifact_attestation_service).
+  ATTESTATION_SIGNING_KEY: ${ATTESTATION_SIGNING_KEY:-}
+  # §27.15: generated artifacts must be writable by the runtime user —
+  # the image provides /app/artifacts (agentos-owned); /data may be root-owned.
+  ARTIFACTS_ROOT: ${ARTIFACTS_ROOT:-/app/artifacts}
+  # Local containers run as development (a local master key is generated);
+  # cloud deploys keep APP_ENV=production + Secret Manager.
+  APP_ENV: ${APP_ENV:-development}
+  SECRETS_MASTER_KEY: ${SECRETS_MASTER_KEY:-local-only-master-key-0123456789abcdef}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+  AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+  # §21.5: local inference through the ordinary dispatch — the planner
+  # and core.chat run on the local Ollama when no hosted key is present.
+  # §29.37: the qualification workload submits paced runs from ONE
+  # measured user; the default 10/min ceiling starves it when the retry
+  # loop re-fires. Raised for the local qualification target only.
+  RATE_LIMIT_WORKFLOW: ${RATE_LIMIT_WORKFLOW:-60}
+  LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://agentos-ollama-1:11434}
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b-instruct}
+  AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+  AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+  AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+  AGENTOS_BROWSER_INTERNAL_TOKEN: ${AGENTOS_BROWSER_INTERNAL_TOKEN:-}
+  AGENTOS_BROWSER_TRUSTED_ENDPOINTS: ${AGENTOS_BROWSER_TRUSTED_ENDPOINTS:-http://worker:8082,http://browser-worker:8082}
+  # Portable profile: no Google credentials needed for core operation.
+
+services:
+  api:
+    profiles: ["core"]
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      <<: *backend-env
+      WORKER_ONLY: "0"
+      # §32.20: the API must NOT run an in-process worker (the development
+      # default is RUN_WORKER=1). An in-process worker would claim managed
+      # builds without engine authority — builds belong to the separate
+      # socket-bearing worker service ("Direct task runner attached").
+      RUN_WORKER: "0"
+      # The image defaults to :8080 (Cloud Run); the local profile binds :8000.
+      PORT: "8000"
+      # §22.15/22.16 controlled local journeys: the browser may target the
+      # container-hosted controlled app. Production leaves this unset.
+      BROWSER_ALLOW_PRIVATE_NETWORK: "1"
+      # §32.20 managed-runner topology — ADMISSION ONLY (values in .env,
+      # never committed). The API declares the topology so durable builds
+      # can be admitted; the socket-bearing runner service executes them.
+      # The executor (WORKER_ONLY=1) fail-fasts without engine authority,
+      # so only this service and the runner carry these values.
+      AGENTOS_RUNNER_IMAGE_DIGEST: ${AGENTOS_RUNNER_IMAGE_DIGEST:-}
+      AGENTOS_RUNNER_PROFILE_DIGEST: ${AGENTOS_RUNNER_PROFILE_DIGEST:-}
+      AGENTOS_RUNNER_DATABASE_URL: ${AGENTOS_RUNNER_DATABASE_URL:-}
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - agentos-data:/data
+      - agentos-artifacts:/app/artifacts
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request as u; u.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    profiles: ["core"]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      <<: *backend-env
+      WORKER_ONLY: "1"
+      AGENTOS_BROWSER_INTERNAL_URL: ${AGENTOS_WORKFLOW_BROWSER_URL:-}
+      # §32.20: the worker EXECUTES managed builds (standalone_build.build_
+      # compute_connector requires a configured runner), so it carries the
+      # topology env AND the engine socket. The fail-fast in
+      # configure_runner (WORKER_ONLY=1) is satisfied by the real socket —
+      # an executor without engine authority must never admit work it
+      # cannot run. Values live in .env — never committed.
+      AGENTOS_RUNNER_IMAGE_DIGEST: ${AGENTOS_RUNNER_IMAGE_DIGEST:-}
+      AGENTOS_RUNNER_PROFILE_DIGEST: ${AGENTOS_RUNNER_PROFILE_DIGEST:-}
+      AGENTOS_RUNNER_DATABASE_URL: ${AGENTOS_RUNNER_DATABASE_URL:-}
+    volumes:
+      - agentos-data:/data
+      - agentos-artifacts:/app/artifacts
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_SOCKET_GID:-991}"
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    profiles: ["core"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  nats:
+    profiles: ["core", "emulators"]
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD-SHELL",
+             "wget -q -O- http://localhost:8222/healthz | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    profiles: ["core"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agentos
+      POSTGRES_PASSWORD: agentos
+      POSTGRES_DB: agentos_test
+    ports:
+      - "55432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentos -d agentos_test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  browser-worker:
+    profiles: ["browser"]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      <<: *backend-env
+      WORKER_ONLY: "1"
+      BROWSER_WORKER: "1"
+      AGENTOS_BROWSER_INTERNAL_URL: ${AGENTOS_DEDICATED_BROWSER_URL:-}
+      # §32.20: this service runs the FULL generic worker loop (it can
+      # claim any workflow task, including managed builds), so it carries
+      # the same runner topology + engine socket as the primary worker.
+      # An unconfigured claimer fails every managed build it wins
+      # ("Configure the approved isolated runner…"). Values in .env.
+      AGENTOS_RUNNER_IMAGE_DIGEST: ${AGENTOS_RUNNER_IMAGE_DIGEST:-}
+      AGENTOS_RUNNER_PROFILE_DIGEST: ${AGENTOS_RUNNER_PROFILE_DIGEST:-}
+      AGENTOS_RUNNER_DATABASE_URL: ${AGENTOS_RUNNER_DATABASE_URL:-}
+    volumes:
+      - agentos-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_SOCKET_GID:-991}"
+    restart: unless-stopped
+
+  runner:
+    profiles: ["runner"]
+    # Generated tools use agentos-runner:latest. Keep that image separate
+    # from this long-lived worker even when the Compose project is "agentos".
+    image: agentos-runner-supervisor:local
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      <<: *backend-env
+      RUNNER_WORKER: "1"
+      # §21.8: generated code runs in SIBLING containers (kernel-enforced
+      # isolation) supervised through the mounted socket; the supervisor
+      # has Docker-engine authority through this socket. RUNNER_WORKER alone
+      # does not route workflow tasks here or configure the managed MCP bridge;
+      # see docs/managed-mcp-builds.md before enabling managed execution.
+      DOCKER_HOST: "unix:///var/run/docker.sock"
+      # §32.20 managed-runner topology — this socket-bearing service is the
+      # EXECUTOR: it configures the real ContainerIsolatedRunner against the
+      # shared PostgreSQL journal (migration 0021) so a replacement can
+      # discover and fence executions (values in .env — never committed).
+      AGENTOS_RUNNER_IMAGE_DIGEST: ${AGENTOS_RUNNER_IMAGE_DIGEST:-}
+      AGENTOS_RUNNER_PROFILE_DIGEST: ${AGENTOS_RUNNER_PROFILE_DIGEST:-}
+      AGENTOS_RUNNER_DATABASE_URL: ${AGENTOS_RUNNER_DATABASE_URL:-}
+    # §32.20: the socket is root-owned with a host-specific group (991 on
+    # this host); the non-root container user (10001) joins that group via
+    # group_add — never run the supervisor as root for socket access.
+    group_add:
+      - "${DOCKER_SOCKET_GID:-991}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - agentos-data:/data
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  firestore-emulator:
+    profiles: ["emulators"]
+    image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    command: gcloud emulators firestore start --host-port=0.0.0.0:8080
+    environment:
+      FIRESTORE_PROJECT_ID: agentos-local-test
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  ollama:
+    profiles: ["local-ai"]
+    image: ollama/ollama:latest
+    # §29 revision: keep the model RESIDENT — an idle unload forces a
+    # 60s+ CPU reload per call and times out the API's planner path.
+    environment:
+      - OLLAMA_KEEP_ALIVE=-1
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      # §27 live_inference_local: the qualifier's readiness gate requires
+      # Docker health=healthy; without this check the probe could never
+      # pass even with the server fully up (the recorded false-negative).
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+volumes:
+  agentos-data:
+  agentos-artifacts:
+  nats-data:
+  ollama-models:
+  postgres-data:

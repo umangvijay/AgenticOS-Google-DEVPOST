@@ -1,0 +1,11 @@
+node_modules
+.next
+.env
+.env.*
+*.pem
+*.key
+*.log
+coverage
+playwright-report
+test-results
+.DS_Store

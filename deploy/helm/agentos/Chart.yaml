@@ -1,0 +1,7 @@
+apiVersion: v2
+name: agentos
+description: AgentOS — agentic workflow platform (API, worker pool, browser worker, isolated runner, frontend)
+type: application
+version: 6.2.0
+appVersion: "6.2.0"
+dependencies: []

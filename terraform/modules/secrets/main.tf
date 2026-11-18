@@ -3,6 +3,8 @@ locals {
   app_secrets = [
     "gemini_api_key",
     "jwt_secret",
+    "jwt_private_key",
+    "jwt_public_key",
     "cors_allowed_origins",
     "contact_smtp_password",
     "secrets_master_key",
@@ -13,7 +15,7 @@ resource "google_secret_manager_secret" "app_secrets" {
   for_each  = toset(local.app_secrets)
   secret_id = "agenticos-${each.key}"
   project   = var.project_id
-  
+
   replication {
     auto {}
   }

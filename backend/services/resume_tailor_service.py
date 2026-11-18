@@ -16,6 +16,16 @@ class AntiFabricationValidator:
         2. No new numerical metrics (numbers) in bullets that aren't in the original bullets.
         3. No new employers/companies.
         """
+        # Identity and dated facts must be preserved exactly while wording changes.
+        if original.contact != tailored.contact:
+            return False
+        original_jobs = {(e.company, e.title, e.start_date, e.end_date) for e in original.experience}
+        if any((e.company, e.title, e.start_date, e.end_date) not in original_jobs for e in tailored.experience):
+            return False
+        if any(e not in original.education for e in tailored.education):
+            return False
+        if any(p.name not in {item.name for item in original.projects} for p in tailored.projects):
+            return False
         # Check skills
         original_skills_norm = {self._normalize(s) for s in original.skills}
         for s in tailored.skills:
@@ -56,22 +66,16 @@ class AntiFabricationValidator:
 
 class ResumeTailorService:
     def __init__(self):
-        from google import genai
-        if settings.GEMINI_API_KEY:
-            self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        else:
-            self.client = genai.Client(
-                vertexai=True, 
-                project=settings.GOOGLE_CLOUD_PROJECT, 
-                location=settings.GOOGLE_CLOUD_REGION
-            )
+        from backend.services.gemini_client import _client
+        self.client = _client()
         self.validator = AntiFabricationValidator()
 
-    def tailor(self, master_resume: Resume, jd: JobDescription, target_job_id: str) -> TailoredResumeVersion:
+    async def tailor(self, master_resume: Resume, jd: JobDescription, target_job_id: str) -> TailoredResumeVersion:
         """
-        Rewrites the master resume to align with the JD without fabricating information.
+        Rewrites the master resume to align with the JD without fabricating
+        information. Phase 2 (§2.11): routed through the shared metered
+        client so every attempt holds a durable budget reservation.
         """
-        from google.genai import types
         
         prompt = f"""
         You are an expert Resume Tailor.
@@ -92,47 +96,24 @@ class ResumeTailorService:
         Return ONLY the updated Resume JSON matching the exact same schema.
         """
         
-        try:
-            from backend.services.gemini_client import candidate_models, is_retryable_model_error
+        from backend.services.gemini_client import generate_json
 
-            last = None
-            response = None
-            for candidate in candidate_models():
-                try:
-                    response = self.client.models.generate_content(
-                        model=candidate,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            response_schema=Resume,
-                            temperature=0.2
-                        )
-                    )
-                    break
-                except Exception as e:
-                    last = e
-                    if is_retryable_model_error(e):
-                        logger.warning("Resume tailor Gemini %s unavailable (%s)", candidate, e)
-                        continue
-                    raise
-            if response is None:
-                raise last or ValueError("Model returned empty response.")
-            
-            if not response.text:
+        try:
+            payload = await generate_json(prompt, schema=Resume)
+            if not payload:
                 raise ValueError("Model returned empty response.")
-                
-            tailored_resume = Resume.model_validate_json(response.text)
-            
+            tailored_resume = payload if isinstance(payload, Resume) else Resume.model_validate(payload)
+
             # Post-tailoring validation
             is_valid = self.validator.validate(master_resume, tailored_resume)
             if not is_valid:
                 logger.error("Anti-fabrication validation failed. Falling back to master resume.")
                 # Fallback to master if hallucination occurs
                 tailored_resume = copy.deepcopy(master_resume)
-                
+
             # Guarantee immutability of the ID
             tailored_resume.id = master_resume.id
-            
+
             return TailoredResumeVersion(
                 id=str(uuid.uuid4()),
                 source_resume_id=master_resume.id,

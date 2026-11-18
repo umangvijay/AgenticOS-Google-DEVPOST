@@ -5,11 +5,9 @@ Configures OpenTelemetry for W3C Trace Context propagation across the agentic wo
 """
 
 import logging
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.propagate import set_global_textmap
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from backend.instrumentation.telemetry import trace_provider
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +19,6 @@ def init_tracing(app_name: str = "AgentOS"):
     if _initialized:
         return
 
-    provider = TracerProvider()
-    
-    # We output to console for local, Jaeger or GCP Trace for cloud
-    processor = BatchSpanProcessor(ConsoleSpanExporter())
-    provider.add_span_processor(processor)
-    trace.set_tracer_provider(provider)
-    
     # Enable W3C Trace Context
     set_global_textmap(TraceContextTextMapPropagator())
     
@@ -38,4 +29,4 @@ def get_tracer(name: str):
     """Get a tracer instance for the current module."""
     if not _initialized:
         init_tracing()
-    return trace.get_tracer(name)
+    return trace_provider.get_tracer(name)

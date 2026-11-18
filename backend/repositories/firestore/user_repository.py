@@ -3,6 +3,8 @@ from google.cloud import firestore
 from backend.repositories.base import BaseUserRepository
 from backend.repositories.firestore.database import FirestoreDB
 from datetime import datetime, timezone
+import hashlib
+from google.api_core.exceptions import NotFound
 
 class FirestoreUserRepository(BaseUserRepository):
     """Firestore implementation of BaseUserRepository."""
@@ -43,17 +45,49 @@ class FirestoreUserRepository(BaseUserRepository):
         payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
         payload.setdefault("failed_login_attempts", 0)
         payload.setdefault("is_active", True)
-        await col.document(user_id).set(payload)
+        db = await FirestoreDB.get_client()
+        email = str(payload.get("email") or "").strip().lower()
+        if not email:
+            raise ValueError("User must have an email")
+        payload["email"] = email
+        identity = db.collection("user_email_claims").document(hashlib.sha256(email.encode()).hexdigest())
+        ref = col.document(user_id)
+
+        @firestore.async_transactional
+        async def create_identity(transaction):
+            claim = await identity.get(transaction=transaction)
+            existing_id = await ref.get(transaction=transaction)
+            # Include legacy identities that predate the uniqueness registry.
+            existing = [doc async for doc in col.where("email", "==", email).limit(1).stream(transaction=transaction)]
+            if claim.exists or existing_id.exists or existing:
+                from backend.models.exceptions import DuplicateIdentityError
+                raise DuplicateIdentityError("Email already registered")
+            transaction.create(identity, {"user_id": user_id})
+            transaction.create(ref, payload)
+
+        await create_identity(db.transaction())
         return user_id
 
     async def update_user(self, user_id: str, updates: Dict[str, Any]) -> bool:
         return await self.update(user_id, updates)
 
+    async def set_user_active(self, user_id: str, is_active: bool) -> bool:
+        return await self.update(user_id, {"is_active": bool(is_active)})
+
     async def increment_failed_logins(self, user_id: str) -> int:
-        user = await self.get_by_id(user_id) or {}
-        count = int(user.get("failed_login_attempts") or 0) + 1
-        await self.update(user_id, {"failed_login_attempts": count})
-        return count
+        db = await FirestoreDB.get_client()
+        ref = db.collection(self.collection_name).document(user_id)
+
+        @firestore.async_transactional
+        async def increment(transaction):
+            doc = await ref.get(transaction=transaction)
+            if not doc.exists:
+                raise ValueError("User not found")
+            count = int((doc.to_dict() or {}).get("failed_login_attempts") or 0) + 1
+            transaction.update(ref, {"failed_login_attempts": count})
+            return count
+
+        return await increment(db.transaction())
 
     async def reset_failed_logins(self, user_id: str) -> None:
         await self.update(user_id, {"failed_login_attempts": 0, "locked_until": None})
@@ -74,13 +108,15 @@ class FirestoreUserRepository(BaseUserRepository):
     async def update(self, user_id: str, updates: Dict[str, Any]) -> bool:
         col = await self._get_collection()
         doc_ref = col.document(user_id)
-        if "updated_at" not in updates:
-            updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        # Identity changes need a dedicated transactional migration; profile updates cannot rename identities.
+        if "email" in updates or "id" in updates:
+            raise ValueError("Identity fields cannot be changed through profile updates")
+        updates = {**updates, "updated_at": datetime.now(timezone.utc).isoformat()}
             
         try:
             await doc_ref.update(updates)
             return True
-        except Exception:
+        except NotFound:
             return False
 
     async def get_by_google_id(self, google_id: str) -> Optional[Dict[str, Any]]:

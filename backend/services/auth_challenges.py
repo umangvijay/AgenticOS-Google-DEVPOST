@@ -2,24 +2,10 @@
 
 from __future__ import annotations
 
+import re
+
 from typing import Any, Dict, Optional
 
-CAPTCHA_HINTS = (
-    "captcha", "recaptcha", "h-captcha", "hcaptcha", "cf-turnstile", "turnstile",
-    "verify you are human", "i'm not a robot", "im not a robot", "are you a robot",
-    "complete the security check", "checking your browser", "challenge-platform",
-    "cloudflare", "access denied", "attention required", "why do i have to complete",
-)
-OTP_HINTS = (
-    "one-time password", "one time password", "one-time code", "one time code",
-    "verification code", "enter the code we sent", "enter the 6-digit",
-    "6-digit code", "otp", "sms code", "texted a code",
-)
-MFA_HINTS = (
-    "two-factor", "two factor", "2-factor", "2fa", "mfa", "multi-factor",
-    "multifactor", "authenticator app", "authentication app", "totp",
-    "enter the code from your authenticator",
-)
 
 
 class ChallengePause(Exception):
@@ -36,27 +22,27 @@ def classify_auth_challenge(snapshot: Dict[str, Any]) -> Optional[str]:
     """Return 'captcha' | 'otp' | 'mfa' when the page is a human verification step."""
     text = str(snapshot.get("text") or "").lower()
     title = str(snapshot.get("title") or "").lower()
-    url = str(snapshot.get("url") or "").lower()
+    blob = f"{title}\n{text}"
     iframes = " ".join(str(x) for x in (snapshot.get("iframes") or [])).lower()
-    blob = f"{text}\n{title}\n{url}\n{iframes}"
-    for hint in CAPTCHA_HINTS:
-        if hint in blob:
-            return "captcha"
-    for hint in MFA_HINTS:
-        if hint in blob:
-            return "mfa"
-    for hint in OTP_HINTS:
-        if hint in blob:
-            return "otp"
-    elements = snapshot.get("elements") or []
-    joined = " ".join(
-        str(el.get("name") or "") + " " + str(el.get("placeholder") or "") + " " + str(el.get("aria") or "")
-        for el in elements if isinstance(el, dict)
-    ).lower()
-    if "otp" in joined or "one-time" in joined or "verification code" in joined:
-        return "otp"
-    if "authenticator" in joined or "totp" in joined:
+    if any(marker in iframes for marker in ("/recaptcha/", "hcaptcha.com", "challenges.cloudflare.com")):
+        return "captcha"
+    if any(hint in blob for hint in (
+        "verify you are human", "i'm not a robot", "complete the security check",
+        "checking your browser", "complete the captcha", "solve the captcha",
+    )):
+        return "captcha"
+    fields = [el for el in (snapshot.get("elements") or []) if isinstance(el, dict)
+              and el.get("tag", "input") in ("input", "textarea")]
+    labels = " ".join(str(el.get(k) or "") for el in fields
+                      for k in ("name", "placeholder", "aria", "autocomplete")).lower()
+    # Word boundaries avoid e.g. getRandomFact, /mfa-docs, and otp inside words.
+    mfa = re.compile(r"\b(?:mfa|2fa|totp|two[- ]factor|multi[- ]factor|authenticator(?: app)?)\b")
+    otp = re.compile(r"\b(?:otp|one[- ]time(?: password| code)?|verification code|6[- ]digit(?: code)?)\b")
+    instruction = bool(re.search(r"\b(?:enter|type|provide|input|verify|confirm)\b", blob))
+    if mfa.search(labels) or (mfa.search(blob) and instruction and (fields or "enter the code" in blob)):
         return "mfa"
+    if otp.search(labels) or (otp.search(blob) and instruction):
+        return "otp"
     return None
 
 

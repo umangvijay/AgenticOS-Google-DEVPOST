@@ -50,7 +50,7 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
     "pure_compute": {
         "wall_time_seconds": 30,
         "memory_mb": 256,
-        "max_processes": 4,
+        "max_processes": 16,
         "workspace_mb": 8,
         "max_output_bytes": 128_000,
         "network": "none",

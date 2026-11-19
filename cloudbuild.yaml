@@ -1,6 +1,13 @@
 # Build immutable API and worker images. Deployment is deliberately separate:
 # API secrets/IAM and a Cloud Run Worker Pool must be configured explicitly.
-timeout: 1800s
+#
+# PREREQUISITE (once per project): an Artifact Registry DOCKER repository.
+# Container Registry (gcr.io hosting) is shut down — pushes there fail on
+# every current project, so images land in Artifact Registry:
+#   gcloud artifacts repositories create agentos \
+#     --repository-format=docker --location=us-central1
+# The Cloud Build service account needs roles/artifactregistry.writer on it.
+timeout: 3600s
 options:
   logging: CLOUD_LOGGING_ONLY
 steps:
@@ -19,7 +26,10 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '--build-arg', 'API_IMAGE=${_API_IMAGE}', '-t', '${_API_IMAGE}-tests', '-f', 'Dockerfile.test', '.']
 
-  # No cloud credentials or network access during tests. The test image is not pushed.
+  # No cloud credentials or network access during the hermetic suite. The
+  # test image is not pushed. Network-dependent tests run in the
+  # integration step below — they previously FAILED here (no docker
+  # daemon, no DNS, no services) instead of running or skipping honestly.
   - name: 'gcr.io/cloud-builders/docker'
     args: ['run', '--rm', '--network=none', '-e', 'APP_ENV=development', '-e', 'STORAGE_BACKEND=sqlite', '-e', 'SQLITE_DB_PATH=/tmp/release.db', '-e', 'JWT_PRIVATE_KEY_PATH=/tmp/keys/private.pem', '-e', 'JWT_PUBLIC_KEY_PATH=/tmp/keys/public.pem', '${_API_IMAGE}-tests']
   # Also check the actual production image without the test-only source overlay.
@@ -28,9 +38,32 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['run', '--rm', '--network=none', '${_WORKER_IMAGE}', 'python', '-c', 'from google.cloud import pubsub_v1; import backend.worker']
 
+  # ── Integration suite (§25/§27/§28 runner + broker + durable replay) ──
+  # The Cloud Build worker's own docker daemon drives the REAL container
+  # semantics these contracts test: the socket is mounted, the isolated
+  # runner image is built, and a disposable Postgres is started on the
+  # host network. The hermetic suite above stays network-free.
+  # 1. Isolated-runner image (same inline definition as
+  #    scripts/build_runner_image.sh).
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'agentos-runner:latest', '-f', 'Dockerfile.runner', '.']
+  # 2. Disposable Postgres for the durable-replay contract (same
+  #    credentials the local compose stack uses; torn down after).
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['run', '--rm', '-d', '--name', 'agentos-ci-pg', '-p', '55432:5432', '-e', 'POSTGRES_USER=agentos', '-e', 'POSTGRES_PASSWORD=agentos', '-e', 'POSTGRES_DB=agentos_test', 'postgres:16-alpine']
+  # 3. Integration modules through the worker daemon + host network.
+  #    docker run propagates pytest's exit code, so a failing contract
+  #    fails the build — cleanup below runs only on success; on failure
+  #    the ephemeral Cloud Build worker is destroyed with its containers.
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['run', '--rm', '--user', 'root', '--network=host', '-v', '/var/run/docker.sock:/var/run/docker.sock', '-e', 'APP_ENV=development', '-e', 'STORAGE_BACKEND=sqlite', '-e', 'SQLITE_DB_PATH=/tmp/ci-integration.db', '-e', 'JWT_PRIVATE_KEY_PATH=/tmp/keys/private.pem', '-e', 'JWT_PUBLIC_KEY_PATH=/tmp/keys/public.pem', '${_API_IMAGE}-tests', 'python', '-m', 'pytest', 'backend/tests/test_phase25_runner_lifecycle.py', 'backend/tests/test_phase28_execution_controls.py', 'backend/tests/test_phase27_egress_broker.py', 'backend/tests/test_schedule_admission.py', 'backend/tests/test_phase24_nats_restart_replay.py', '-q', '--no-header', '-p', 'no:cacheprovider', '--timeout=600']
+  # 4. Best-effort Postgres teardown on the success path.
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['rm', '-f', 'agentos-ci-pg']
+
 images:
   - '${_API_IMAGE}'
   - '${_WORKER_IMAGE}'
 substitutions:
-  _API_IMAGE: 'gcr.io/${PROJECT_ID}/agentos-api'
-  _WORKER_IMAGE: 'gcr.io/${PROJECT_ID}/agentos-worker'
+  _API_IMAGE: 'us-central1-docker.pkg.dev/${PROJECT_ID}/agentos/agentos-api'
+  _WORKER_IMAGE: 'us-central1-docker.pkg.dev/${PROJECT_ID}/agentos/agentos-worker'

@@ -42,8 +42,11 @@ echo "── Building API + worker images (Cloud Build) ──"
 gcloud builds submit --config=cloudbuild.yaml \
   --project="${PROJECT_ID}" .
 
-API_IMAGE="gcr.io/${PROJECT_ID}/agentos-api:latest"
-WORKER_IMAGE="gcr.io/${PROJECT_ID}/agentos-worker:latest"
+# Must match cloudbuild.yaml's push targets (Artifact Registry — gcr.io
+# hosting is shut down; a stale gcr.io ref makes `gcloud run deploy
+# --image` fail with "image not found").
+API_IMAGE="us-central1-docker.pkg.dev/${PROJECT_ID}/agentos/agentos-api:latest"
+WORKER_IMAGE="us-central1-docker.pkg.dev/${PROJECT_ID}/agentos/agentos-worker:latest"
 
 # ── 2. Discover live services (image-only deploy keeps their config) ────────
 detect_service() { # $1 = substring to match
@@ -89,7 +92,7 @@ if [[ "${DEPLOY_FRONTEND}" == "1" ]]; then
     gcloud builds submit --config=cloudbuild.frontend.yaml \
       --substitutions="_API_URL=${NEXT_PUBLIC_API_URL}" \
       --project="${PROJECT_ID}" .
-    deploy_image "${FRONTEND_SERVICE}" "us-central1-docker.pkg.dev/${PROJECT_ID}/veyrune/frontend:latest"
+    deploy_image "${FRONTEND_SERVICE}" "us-central1-docker.pkg.dev/${PROJECT_ID}/agentos/frontend:latest"
   fi
 fi
 

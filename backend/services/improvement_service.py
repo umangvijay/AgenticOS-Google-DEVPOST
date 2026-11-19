@@ -22,6 +22,7 @@ Deterministic guarantees (the model can never argue its way past these):
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -356,9 +357,40 @@ class ImprovementService:
         # cohort admissions; promotion cannot reuse offline/shadow numbers
         # as proof of canary performance.
         thresholds = self._thresholds(experiment)
+        # §13.17/§27.R5: an EVIDENCE refusal is terminal for THIS
+        # experiment. A canary whose promotion gate refuses must stop
+        # serving its candidate to the cohort — `active_for_target` only
+        # filters SHADOW/CANARY, so a still-CANARY refused candidate kept
+        # claiming cohort admissions after the incumbent was restored.
+        # Procedural refusals above (approver identity, state machine)
+        # leave the state unchanged: they do not evaluate the evidence.
+        async def _reject_and_raise(exc: ImprovementError) -> "ImprovementError":
+            try:
+                # CANARY → REJECTED is an APPROVER transition (the
+                # promotion refuser IS the approver of record). Re-read
+                # the CAS version: cohort admissions during the canary
+                # may have advanced it past the snapshot this call loaded.
+                current = await self.repo.get_experiment(experiment_id)
+                await self.repo.transition(
+                    experiment_id, ExperimentState.REJECTED,
+                    role=ROLE_APPROVER, actor=approver,
+                    actor_field="approved_by",
+                    expected_version=current.state_version
+                    if current else experiment.state_version,
+                    rollback_reason=str(exc))
+            except Exception:
+                logger.warning(
+                    "Failed to terminalize refused experiment %s",
+                    experiment_id, exc_info=True)
+            raise exc
+
         if hasattr(self.repo, "exposure_count"):
             exposures = await self.repo.exposure_count(experiment_id)
             if exposures < thresholds.min_canary_exposures:
+                # §13.18 insufficient-count is a WAITING refusal, not a
+                # verdict: more cohort admissions may still satisfy the
+                # declared minimum, so the experiment STAYS in CANARY and
+                # promotion may be retried after evidence accrues.
                 raise ImprovementError(
                     f"Canary evidence insufficient: {exposures} counted "
                     f"exposure(s), the predeclared minimum is "
@@ -383,9 +415,9 @@ class ImprovementService:
                 current_hash = _hl.sha256(
                     str(current.get("template", "")).encode()).hexdigest()[:32]
                 if current_hash != pinned_entry.get("content_sha256"):
-                    raise ImprovementError(
+                    await _reject_and_raise(ImprovementError(
                         f"The pinned {role} prompt content changed after "
-                        "proposal — a NEW experiment is required (§13.10)")
+                        "proposal — a NEW experiment is required (§13.10)"))
 
         results = json.loads(experiment.results_json or "{}")
         candidate = results.get("candidate") or {}
@@ -417,9 +449,9 @@ class ImprovementService:
 
         success = _finite_metric(candidate, "success")
         if success < thresholds.success_min:
-            raise ImprovementError(
+            await _reject_and_raise(ImprovementError(
                 f"Candidate success {success} is below the predeclared "
-                f"floor {thresholds.success_min}")
+                f"floor {thresholds.success_min}"))
         # §13.12: minimum sample coverage — a promotion gate cannot pass on
         # an empty comparison.
         samples = candidate.get("samples")
@@ -440,15 +472,15 @@ class ImprovementService:
             else:
                 regressed = base - cand > thresholds.regression_max
             if regressed:
-                raise ImprovementError(
+                await _reject_and_raise(ImprovementError(
                     f"Candidate regressed on '{metric}': {cand} vs baseline "
-                    f"{base} (allowed max regression {thresholds.regression_max})")
+                    f"{base} (allowed max regression {thresholds.regression_max})"))
         if thresholds.cost_max_usd is not None:
             cost = _finite_metric(candidate, "cost_usd")
             if cost > thresholds.cost_max_usd:
-                raise ImprovementError(
+                await _reject_and_raise(ImprovementError(
                     f"Candidate cost {cost} exceeds the predeclared ceiling "
-                    f"{thresholds.cost_max_usd}")
+                    f"{thresholds.cost_max_usd}"))
 
         # §13.12: server-owned mandatory constraints — always evaluated,
         # unioned with the proposal's declared constraints.
@@ -457,10 +489,10 @@ class ImprovementService:
         violations = [c for c in sorted(mandatory)
                       if not _constraint_true(candidate, c)]
         if violations:
-            raise ImprovementError(
+            await _reject_and_raise(ImprovementError(
                 "Critical constraint(s) violated: "
                 f"{', '.join(violations)} — promotion refused regardless of "
-                "average quality (§13 acceptance)")
+                "average quality (§13 acceptance)"))
 
         # 30.30: an evaluation HOLD (insufficient subgroup support, a
         # deterministic log without overlap, or a predeclared hold) blocks
@@ -470,9 +502,9 @@ class ImprovementService:
         )
         hold = evaluation_hold_reason(candidate)
         if hold:
-            raise ImprovementError(
+            await _reject_and_raise(ImprovementError(
                 f"Promotion HOLD: {hold} — resolve the evidence gap before "
-                "this candidate may affect workers")
+                "this candidate may affect workers"))
 
         return await self.repo.transition(
             experiment_id, ExperimentState.PROMOTED,

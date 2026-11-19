@@ -20,6 +20,10 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 6.37"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 
   backend "gcs" {
@@ -31,6 +35,27 @@ terraform {
 provider "google" {
   project = var.project_id
   region  = var.region
+}
+
+# ── Service enablement for THIS topology ───────────────────────────
+# The root main.tf enables firestore/secretmanager/cloudrun/pubsub for
+# the Firestore profile; the GCP/PostgreSQL target needs its own APIs.
+# disable_on_destroy=false keeps a re-apply from shutting shared APIs.
+resource "google_project_service" "sqladmin" {
+  service            = "sqladmin.googleapis.com"
+  disable_on_destroy = false
+}
+resource "google_project_service" "compute" {
+  service            = "compute.googleapis.com"
+  disable_on_destroy = false
+}
+resource "google_project_service" "servicenetworking" {
+  service            = "servicenetworking.googleapis.com"
+  disable_on_destroy = false
+}
+resource "google_project_service" "artifactregistry" {
+  service            = "artifactregistry.googleapis.com"
+  disable_on_destroy = false
 }
 
 # ── shared foundation ──────────────────────────────────────────────
@@ -112,7 +137,92 @@ module "cloud_sql" {
   network_id      = google_compute_network.vpc.id
   iam_user_emails = [module.iam.api_sa_email, module.iam.worker_sa_email]
 
-  depends_on = [google_service_networking_connection.private_services_access]
+  depends_on = [
+    google_service_networking_connection.private_services_access,
+    google_project_service.sqladmin,
+    google_project_service.compute,
+  ]
+}
+
+# ── Application database credentials ───────────────────────────────
+# The app reads ONE env var (POSTGRES_DSN). Assemble the socket DSN with
+# the generated password, store it in Secret Manager, and wire it as a
+# secret-backed env var on the API and worker — the password never
+# appears in plain env vars, logs, or the DSN of a plain variable.
+resource "google_secret_manager_secret" "postgres_dsn" {
+  secret_id = "agenticos-postgres-dsn"
+  project   = var.project_id
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [module.secrets]
+}
+
+locals {
+  postgres_dsn_secret = "postgresql://${module.cloud_sql.app_user_name}@/agentos?host=/cloudsql/${module.cloud_sql.connection_name}"
+}
+
+resource "google_secret_manager_secret_version" "postgres_dsn" {
+  secret      = google_secret_manager_secret.postgres_dsn.id
+  secret_data = "${local.postgres_dsn_secret}&password=${module.cloud_sql.app_user_password}"
+
+  depends_on = [module.cloud_sql]
+}
+
+resource "google_secret_manager_secret_iam_member" "postgres_dsn_api" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.postgres_dsn.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${module.iam.api_sa_email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "postgres_dsn_worker" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.postgres_dsn.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${module.iam.worker_sa_email}"
+}
+
+# ── Pub/Sub transport grants ───────────────────────────────────────
+# The app's PubSubMessageBus publishes to and consumes from the topics
+# the pubsub module creates; the service accounts need the project-level
+# roles or every publish/consume is DENIED.
+resource "google_project_iam_member" "api_pubsub_publisher" {
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${module.iam.api_sa_email}"
+}
+
+resource "google_project_iam_member" "api_pubsub_subscriber" {
+  project = var.project_id
+  role    = "roles/pubsub.subscriber"
+  member  = "serviceAccount:${module.iam.api_sa_email}"
+}
+
+resource "google_project_iam_member" "api_pubsub_viewer" {
+  project = var.project_id
+  role    = "roles/pubsub.viewer"
+  member  = "serviceAccount:${module.iam.api_sa_email}"
+}
+
+resource "google_project_iam_member" "worker_pubsub_publisher" {
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${module.iam.worker_sa_email}"
+}
+
+resource "google_project_iam_member" "worker_pubsub_subscriber" {
+  project = var.project_id
+  role    = "roles/pubsub.subscriber"
+  member  = "serviceAccount:${module.iam.worker_sa_email}"
+}
+
+resource "google_project_iam_member" "worker_pubsub_viewer" {
+  project = var.project_id
+  role    = "roles/pubsub.viewer"
+  member  = "serviceAccount:${module.iam.worker_sa_email}"
 }
 
 # ── GCS artifacts ──────────────────────────────────────────────────
@@ -132,21 +242,18 @@ module "artifacts" {
 # ── Cloud SQL proxy + env contract shared by API and worker ────────
 
 locals {
-  # asyncpg DSN over the auth proxy unix socket; IAM token auth.
-  postgres_dsn = "postgresql://${module.iam.api_sa_email}@/agentos?host=/cloudsql/${module.cloud_sql.connection_name}"
-
   shared_env = merge(var.shared_env_vars, {
     STORAGE_BACKEND = "postgres"
-    POSTGRES_DSN    = local.postgres_dsn
-    # NATS over the public endpoint until a private-path decision is
-    # made (JetStream persistence lives in Cloud SQL's outbox today;
-    # the bus transport degrades to in-process pull when NATS is
-    # unreachable — recorded in supported-profiles.md).
+    # POSTGRES_DSN is SECRET-BACKED (see google_secret_manager_secret_version
+    # above): socket DSN through the auth-proxy sidecar + the generated
+    # password. It must not exist as a plain env var.
+    # Bus transport: Google-managed Pub/Sub (the pubsub module provisions
+    # every topic the app consumes plus the -worker-sub pull
+    # subscriptions; NATS would need its own deployment this profile
+    # does not include).
     MESSAGE_BUS_TRANSPORT = var.message_bus_transport
-    NATS_SERVERS          = var.nats_servers
     GOOGLE_CLOUD_PROJECT  = var.project_id
     GOOGLE_CLOUD_REGION   = var.region
-    GCS_ARTIFACT_BUCKET   = module.artifacts.bucket_name
   })
 }
 
@@ -186,6 +293,16 @@ resource "google_cloud_run_v2_service" "api" {
         }
       }
 
+      env {
+        name = "POSTGRES_DSN"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.postgres_dsn.id
+            version = "latest"
+          }
+        }
+      }
+
       resources {
         limits = {
           cpu    = "2"
@@ -195,7 +312,8 @@ resource "google_cloud_run_v2_service" "api" {
     }
 
     # Cloud SQL Auth Proxy sidecar: IAM-authenticated unix socket at
-    # /cloudsql/<connection_name>; no DB credentials in Secret Manager.
+    # /cloudsql/<connection_name>; the application credentials flow as a
+    # Secret Manager secret (POSTGRES_DSN), never a plain env var.
     containers {
       name  = "cloud-sql-proxy"
       image = "gcr.io/cloud-sql-proxy/cloud-sql-proxy:2.14.0"
@@ -266,6 +384,16 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
         }
       }
 
+      env {
+        name = "POSTGRES_DSN"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.postgres_dsn.id
+            version = "latest"
+          }
+        }
+      }
+
       resources {
         limits = {
           cpu    = "2"
@@ -303,4 +431,49 @@ module "scheduler" {
   region             = var.region
   pubsub_topic_id    = module.pubsub.scheduler_topic_id
   scheduler_sa_email = module.iam.scheduler_sa_email
+}
+
+# ── Frontend (optional: provide var.frontend_image) ────────────────
+# The Next.js standalone server needs no Cloud SQL proxy; it talks to
+# the API over the project's public endpoint baked at BUILD time
+# (NEXT_PUBLIC_API_URL in cloudbuild.frontend.yaml — runtime env cannot
+# rewrite a browser bundle).
+resource "google_cloud_run_v2_service" "frontend" {
+  count = var.frontend_image != "" ? 1 : 0
+
+  name     = "agentos-frontend"
+  location = var.region
+  project  = var.project_id
+  ingress  = "INGRESS_TRAFFIC_ALL"
+
+  template {
+    service_account = module.iam.api_sa_email
+    containers {
+      image = var.frontend_image
+      env {
+        name  = "PORT"
+        value = "3000"
+      }
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "1Gi"
+        }
+      }
+    }
+    scaling {
+      min_instance_count = 0
+      max_instance_count = var.api_max_instances
+    }
+  }
+}
+
+resource "google_cloud_run_v2_service_iam_member" "frontend_public" {
+  count = (var.frontend_image != "" && var.api_public) ? 1 : 0
+
+  name     = google_cloud_run_v2_service.frontend[0].name
+  location = var.region
+  project  = var.project_id
+  role     = "roles/run.invoker"
+  member   = "allUsers"
 }

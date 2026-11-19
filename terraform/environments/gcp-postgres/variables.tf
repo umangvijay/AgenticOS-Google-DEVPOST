@@ -32,8 +32,11 @@ variable "api_public" {
 }
 
 variable "api_max_instances" {
+  # The artifact store is per-instance POSIX until the GCS backend lands
+  # (recorded in deploy-gcp.md): a second API instance serves downloads
+  # from ITS OWN filesystem. Keep 1 until that backend exists.
   type    = number
-  default = 10
+  default = 1
 }
 
 variable "worker_instances" {
@@ -43,13 +46,13 @@ variable "worker_instances" {
 }
 
 variable "message_bus_transport" {
-  description = "Bus transport for this target (nats or memory-pull fallback)"
+  description = "Bus transport for this target. pubsub: the pubsub module provisions every topic the app consumes plus the -worker-sub pull subscriptions. nats requires a NATS deployment this profile does not include."
   type        = string
-  default     = "nats"
+  default     = "pubsub"
 }
 
-variable "nats_servers" {
-  description = "NATS endpoint for the worker pool"
+variable "frontend_image" {
+  description = "Artifact Registry image URL for the frontend (from cloudbuild.frontend.yaml); empty = no frontend service"
   type        = string
   default     = ""
 }

@@ -299,7 +299,8 @@ class RepositoryFactory:
         from backend.repositories.postgres.database import PostgresDatabaseManager
         from backend.repositories.postgres import repositories as pgrepo
 
-        self.db_manager = PostgresDatabaseManager(settings.POSTGRES_DSN)
+        self.db_manager = PostgresDatabaseManager(settings.POSTGRES_DSN,
+                                                  schema=settings.POSTGRES_SCHEMA)
         await self.db_manager.initialize()
         db = self.db_manager
 

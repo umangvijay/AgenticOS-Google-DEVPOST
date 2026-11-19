@@ -22,6 +22,7 @@ from datetime import date, datetime, timezone
 import pytest
 import pytest_asyncio
 
+from backend.models.usage import utc_period_day
 from backend.models.usage import (
     BudgetScope, ReservationRequest, ReservationState, SettlementReceipt,
 )
@@ -33,7 +34,11 @@ from backend.repositories.sqlite.database import DatabaseManager
 from backend.services.agent_authority import effective_authority
 from backend.worker import authorize_background_execution
 
-TODAY = date.today().isoformat()
+# §2.14: the authoritative accounting period is the UTC calendar day —
+# NOT date.today() (the host's LOCAL day). In UTC+X timezones the two
+# diverge for hours after every local midnight, and the snapshot then
+# filters a different period than the reservation wrote (all zeros).
+TODAY = utc_period_day()
 
 
 # ── denied work explains itself ───────────────────────────────────────

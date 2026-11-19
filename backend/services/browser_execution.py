@@ -362,8 +362,30 @@ class BrowserExecutionService:
             controller_epoch=f"epoch-{uuid.uuid4().hex[:8]}")
         session._playwright = await async_playwright().start()
         try:
-            session._browser = await session._playwright.chromium.launch(
-                headless=self._headless)
+            # A browser SPAWN can transiently fail on a loaded node (the
+            # child dies before the CDP handshake — TargetClosedError at
+            # launch, seen on full-suite CI runs and busy hosts). The
+            # spawn is an environment operation, not the session
+            # contract: retry it boundedly. Failures AFTER the handshake
+            # still fail loudly.
+            session._browser = None
+            for attempt in range(3):
+                try:
+                    session._browser = await session._playwright.chromium.launch(
+                        headless=self._headless)
+                    break
+                except Exception as exc:
+                    name = type(exc).__name__
+                    transient = "TargetClosedError" in name or (
+                        "TargetClosedError" in str(exc)
+                        and "launch" in str(exc).lower())
+                    if attempt == 2 or not transient:
+                        raise
+                    logger.warning(
+                        "Browser spawn failed transiently (attempt %d): %s",
+                        attempt + 1, exc)
+                    await asyncio.sleep(0.5 * (attempt + 1))
+            assert session._browser is not None
             context = await session._browser.new_context(service_workers="block")
 
             async def guard(route):

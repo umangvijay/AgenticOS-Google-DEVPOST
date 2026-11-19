@@ -21,6 +21,14 @@ resource "google_sql_database_instance" "postgres" {
     disk_size         = var.disk_size_gb
     disk_type         = "PD_SSD"
 
+    # IAM database authentication must be explicitly ON for the
+    # CLOUD_IAM_SERVICE_ACCOUNT users below (not guaranteed-by-default
+    # on every instance creation path).
+    database_flags {
+      name  = "cloudsql.iam_authentication"
+      value = "on"
+    }
+
     ip_configuration {
       ipv4_enabled    = false
       private_network = var.network_id
@@ -58,6 +66,23 @@ resource "google_sql_user" "iam_users" {
   instance = google_sql_database_instance.postgres.name
   project  = var.project_id
   type     = "CLOUD_IAM_SERVICE_ACCOUNT"
+}
+
+# The APPLICATION connects with a password user through the Cloud SQL
+# Auth Proxy sidecar (the app reads POSTGRES_DSN; it does not fetch IAM
+# tokens as database passwords). The password is generated here, stored
+# ONLY in Terraform state + Secret Manager, and assembled into the
+# socket DSN the overlay wires as a secret-backed env var.
+resource "random_password" "app_user" {
+  length  = 32
+  special = false
+}
+
+resource "google_sql_user" "app_user" {
+  name     = var.app_user_name
+  instance = google_sql_database_instance.postgres.name
+  project  = var.project_id
+  password = random_password.app_user.result
 }
 
 resource "google_sql_database" "database" {

@@ -144,8 +144,12 @@ class ContainerIsolatedRunner(IsolatedRunner):
         if stopped:
             return True
         # A different process may own the namespace. Its supervisor polls
-        # the durable cancellation intent and records confirmed termination.
-        for _ in range(25):
+        # the durable cancellation intent (every ≤0.25 s) and records
+        # confirmed termination. The reconcile wait must cover SIGKILL +
+        # durable write on a LOADED host — a fixed 2.5 s budget turned a
+        # slow-but-successful cancellation into a false negative when the
+        # daemon was busy (full-suite runs hit this on shared hosts).
+        for _ in range(100):
             await asyncio.sleep(0.1)
             row = self.store.get(execution_id)
             if row["state"] != "cancel_requested":

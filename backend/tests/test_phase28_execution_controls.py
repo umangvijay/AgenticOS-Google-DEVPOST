@@ -98,6 +98,34 @@ def test_sqlite_legacy_journal_without_stopped_column_is_carried_forward(tmp_pat
 async def test_cancellation_intent_is_durable_before_owner_signal(tmp_path, monkeypatch):
     from backend.runners.container_runner import ContainerRunner
 
+    # The contract under test needs a reachable docker daemon (real
+    # container cancel semantics). Without one, skip EXPLICITLY — never
+    # fail on an unrelated daemon connection error. Mirror
+    # ContainerRunner's own daemon discovery (from_env + colima sockets).
+    import os as _os
+    import docker as _docker_sdk
+
+    def _daemon_available() -> bool:
+        try:
+            _docker_sdk.from_env().ping()
+            return True
+        except Exception:
+            pass
+        for _candidate in (_os.path.expanduser("~/.colima/default/docker.sock"),
+                           _os.path.expanduser("~/.colima/_lima/colima/docker.sock")):
+            if _os.path.exists(_candidate):
+                try:
+                    _docker_sdk.DockerClient(
+                        base_url=f"unix://{_candidate}").ping()
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    if not _daemon_available():
+        pytest.skip("BLOCKED: docker daemon unavailable — durable-cancellation "
+                    "contract needs real container semantics")
+
     store = ExecutionStore(tmp_path / "journal.db")
     observed = {}
 
@@ -219,7 +247,7 @@ async def test_runner_refuses_dispatch_without_current_authority(tmp_path):
 
 # ── 4. The broker records its decision and the destination observation ─
 
-def test_broker_records_decision_and_destination_observation():
+def test_broker_records_decision_and_destination_observation(monkeypatch):
     from backend.runners.egress_broker import EgressBroker, EgressGrant, EgressDeniedError
 
     class RecordingCheck:
@@ -235,6 +263,14 @@ def test_broker_records_decision_and_destination_observation():
     grant = EgressGrant(allowed=[("example.com", 443)])
     broker = EgressBroker(grant)
     check = RecordingCheck()
+    # The broker re-resolves the destination itself after the authority
+    # check; keep that resolution hermetic (CI runs --network=none) —
+    # the OBSERVATION contract under test is the check-hook call, not
+    # the OS resolver.
+    import backend.runners.egress_broker as _eb
+    monkeypatch.setattr(
+        _eb.socket, "getaddrinfo",
+        lambda *a, **k: [(None, None, None, "", ("93.184.216.34", 0))])
     # Authorized destination: the broker validates, resolves through its
     # own checker, and hands back the vetted address.
     scheme, host, port = broker.validate_url(

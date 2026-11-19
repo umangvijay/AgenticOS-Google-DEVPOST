@@ -23,4 +23,4 @@ images:
 substitutions:
   _GOOGLE_CLIENT_ID: ''
   _API_URL: 'https://REPLACE_API_HOST/api/v1'
-  _FRONTEND_IMAGE: 'us-central1-docker.pkg.dev/${PROJECT_ID}/veyrune/frontend:latest'
+  _FRONTEND_IMAGE: 'us-central1-docker.pkg.dev/${PROJECT_ID}/agentos/frontend:latest'

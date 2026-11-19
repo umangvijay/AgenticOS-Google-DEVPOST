@@ -12,8 +12,14 @@ from backend.services.runner_bridge import ContainerIsolatedRunner
 
 @pytest.mark.asyncio
 async def test_two_executions_cancel_and_restart(tmp_path):
-    inspect = subprocess.run(["docker", "image", "inspect", "agentos-runner:latest",
-                              "--format", "{{.Id}}"], capture_output=True, text=True)
+    try:
+        inspect = subprocess.run(["docker", "image", "inspect", "agentos-runner:latest",
+                                  "--format", "{{.Id}}"], capture_output=True, text=True)
+    except OSError:
+        # No docker CLI in this environment (e.g. the CI test container):
+        # an honest, explicitly-blocked skip — never a test error.
+        pytest.skip("BLOCKED: docker CLI unavailable — runner lifecycle needs "
+                    "the host daemon and the agentos-runner image")
     if inspect.returncode:
         pytest.skip("qualification requires the local runner image and Docker daemon")
     image = inspect.stdout.strip()
@@ -53,8 +59,12 @@ async def test_two_executions_cancel_and_restart(tmp_path):
 
 @pytest.mark.asyncio
 async def test_cancelled_coroutine_stops_real_container(tmp_path):
-    inspect = subprocess.run(["docker", "image", "inspect", "agentos-runner:latest",
-                              "--format", "{{.Id}}"], capture_output=True, text=True)
+    try:
+        inspect = subprocess.run(["docker", "image", "inspect", "agentos-runner:latest",
+                                  "--format", "{{.Id}}"], capture_output=True, text=True)
+    except OSError:
+        pytest.skip("BLOCKED: docker CLI unavailable — runner lifecycle needs "
+                    "the host daemon and the agentos-runner image")
     if inspect.returncode:
         pytest.skip("qualification requires Docker and the local runner image")
     runner = ContainerIsolatedRunner(image=inspect.stdout.strip(), profile_digest="test-profile",

@@ -1,0 +1,8 @@
+# The §21.8 isolated-runner image (alpine + python3 + non-root user).
+# Generated tool executions run as SIBLING containers from this image,
+# supervised through the mounted host docker socket. Mirrors the inline
+# definition in scripts/build_runner_image.sh; CI (cloudbuild.yaml)
+# builds it so the runner-lifecycle contracts execute for real.
+FROM alpine:3.19
+RUN apk add --no-cache python3 py3-pip
+RUN adduser -D -u 1000 runner

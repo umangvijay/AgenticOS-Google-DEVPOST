@@ -46,14 +46,25 @@ def _pg_up() -> bool:
 @pytest.fixture
 def broker():
     # Use the installed image but never restart the application's broker.
+    # Prefer the running stack's image; fall back to the upstream
+    # nats:2.10-alpine so CI (no compose stack, daemon-provided pull)
+    # can run the replay contract instead of skipping it.
     image = subprocess.run(["docker", "inspect", "agentos-nats-1", "--format", "{{.Image}}"],
                            capture_output=True, text=True)
-    if image.returncode:
-        pytest.skip("BLOCKED: local NATS image/daemon unavailable")
+    image_ref = image.stdout.strip() if image.returncode == 0 and image.stdout.strip() \
+        else "nats:2.10-alpine"
+    if image.returncode != 0:
+        # Fallback path only: the daemon must fetch the upstream image
+        # (the inspected ref is a local image ID — never pull that).
+        pull = subprocess.run(["docker", "pull", "--quiet", image_ref],
+                              capture_output=True, text=True)
+        if pull.returncode:
+            pytest.skip("BLOCKED: no NATS image/daemon available "
+                        "(docker inspect agentos-nats-1 and docker pull failed)")
     name = "agentos-p25-nats-" + uuid.uuid4().hex[:12]
     def start(port=""):
         subprocess.run(["docker", "run", "--rm", "-d", "--name", name,
-                        "-p", f"127.0.0.1:{port}:4222", image.stdout.strip(), "-js"],
+                        "-p", f"127.0.0.1:{port}:4222", image_ref, "-js"],
                        capture_output=True, check=True, timeout=30)
     try:
         start()

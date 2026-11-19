@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     STORAGE_BACKEND: str = "sqlite"
     # §21.3: PostgreSQL connection (STORAGE_BACKEND=postgres).
     POSTGRES_DSN: str = "postgresql://agentos:agentos@127.0.0.1:55432/agentos_test"
+    # §21.3 schema isolation: a dedicated schema (search_path-enforced in
+    # every pooled connection) separates a deployment/tenant/test run from
+    # other users of the same database — tests set this per-run so live
+    # dispatchers on the shared database cannot claim their outbox rows.
+    POSTGRES_SCHEMA: Optional[str] = None
     # §21.4: durable message transport selection. "inprocess" (default,
     # single-process), "nats" (JetStream across separate processes),
     # "pubsub" (GCP).

@@ -26,7 +26,8 @@ async def pg_stack(monkeypatch, tmp_path):
     from backend.repositories.factory import RepositoryFactory
     from backend.repositories.postgres.database import PostgresDatabaseManager
     db = PostgresDatabaseManager(settings.POSTGRES_DSN, schema="p26_wait_" + uuid.uuid4().hex)
-    monkeypatch.setattr("backend.repositories.postgres.database.PostgresDatabaseManager", lambda dsn: db)
+    monkeypatch.setattr("backend.repositories.postgres.database.PostgresDatabaseManager",
+                          lambda dsn, **kwargs: db)
     factory = RepositoryFactory()
     await factory.initialize()
     from backend.engine.engine import WorkflowEngine

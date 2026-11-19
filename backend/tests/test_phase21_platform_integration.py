@@ -8,6 +8,8 @@ import uuid
 import pytest
 import pytest_asyncio
 
+from backend.config import settings as settings_mod
+
 PG_DSN = "postgresql://agentos:agentos@127.0.0.1:55432/agentos_test"
 NATS_SERVERS = "nats://127.0.0.1:4222"
 
@@ -53,11 +55,28 @@ async def pg_factory(monkeypatch):
                     "-e POSTGRES_DB=agentos_test postgres:16-alpine")
     factory = _factory_with(monkeypatch, storage="postgres",
                             transport="inprocess")
+    # Per-run SCHEMA isolation (§21.3): the shared agentos_test database
+    # also serves the LIVE compose stack — its outbox dispatcher polls
+    # pg_outbox_v2 with FOR UPDATE SKIP LOCKED every second and wins the
+    # claim race against freshly appended test events (observed once as
+    # `claimed == []` in a full-suite run). A search_path-enforced schema
+    # keeps the test's rows invisible to it.
+    from uuid import uuid4
+    schema = "p21_" + uuid4().hex[:10]
+    monkeypatch.setattr(settings_mod.settings, "POSTGRES_SCHEMA", schema)
     await factory.initialize()
     try:
         yield factory
     finally:
         await factory.shutdown()
+        # Drop the run's schema so repeated full-suite executions do not
+        # accumulate residue in the shared development database.
+        import asyncpg as _asyncpg
+        conn = await _asyncpg.connect(PG_DSN)
+        try:
+            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        finally:
+            await conn.close()
 
 
 async def test_factory_initializes_full_inventory_on_postgres(pg_factory):

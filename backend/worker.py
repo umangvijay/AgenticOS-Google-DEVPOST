@@ -1049,6 +1049,30 @@ if __name__ == "__main__":
     worker_only = os.environ.get("WORKER_ONLY", "1")
     logger.info("Starting standalone worker process (WORKER_ONLY=%s)", worker_only)
 
+    async def _serve_health(port: int):
+        """Cloud Run services REQUIRE the container to listen on $PORT —
+        a worker that only consumes Pub/Sub pulls fails deployment with
+        'Container failed to start ... listen on the port'. Serve a tiny
+        health response for the platform's startup probe; everything else
+        keeps its own protocol."""
+        async def _handler(reader, writer):
+            try:
+                await reader.read(4096)
+                body = b'{"status":"healthy","service":"worker"}'
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                             b"Content-Length: " + str(len(body)).encode()
+                             + b"\r\nConnection: close\r\n\r\n" + body)
+                await writer.drain()
+            except Exception:
+                pass
+            finally:
+                writer.close()
+
+        server = await asyncio.start_server(_handler, "0.0.0.0", port)
+        logger.info("Worker health server listening on :%d", port)
+        async with server:
+            await server.serve_forever()
+
     async def _boot_and_run():
         from backend.config.settings import settings
         from backend.repositories.factory import RepositoryFactory
@@ -1105,6 +1129,9 @@ if __name__ == "__main__":
             logger.warning("Worker boot with missing repositories %s — "
                            "background authorization will fail closed", missing)
         from backend.services.browser_runtime_server import browser_runtime_server
+        health_port = int(os.environ.get("PORT", "0") or 0)
+        health_task = asyncio.create_task(_serve_health(health_port)) \
+            if health_port > 0 else None
         try:
             async with browser_runtime_server():
                 await start_worker(factory.message_bus, workflow_engine, factory.schedule_repo,
@@ -1112,6 +1139,8 @@ if __name__ == "__main__":
                                    factory.idempotency_repo, factory.user_repo, factory.org_repo,
                                    mcp_repo=getattr(factory, "mcp_repo", None))
         finally:
+            if health_task is not None:
+                health_task.cancel()
             from backend.services.http_pool import aclose_client
             try:
                 await factory.shutdown()

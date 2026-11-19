@@ -4,7 +4,13 @@ ARG API_IMAGE
 FROM ${API_IMAGE}
 
 USER root
+# git: repository/identity tests inspect build scripts and source history.
+# docker CLI: the runner-lifecycle and broker-recreation tests drive REAL
+# containers through the host daemon socket mounted by CI (see
+# cloudbuild.yaml's integration step) — without the CLI those tests
+# errored (FileNotFoundError) instead of running or skipping honestly.
 RUN apt-get update && apt-get install -y --no-install-recommends git \
+    docker.io \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY . .

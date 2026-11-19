@@ -124,6 +124,41 @@ writes the local POSIX backend), the bus transport decision for Cloud
 Run (NATS endpoint vs. Postgres-outbox pull) is unresolved, and no
 `terraform apply` has been executed against a real project.
 
+### 4a-bis. Deploy-critical corrections (2026-11-19 audit)
+
+Four errors were found and fixed in the deploy path — audit against
+`terraform/environments/gcp-postgres/` and `cloudbuild*.yaml`:
+
+1. **`cloudbuild.yaml` pushed to Container Registry (`gcr.io/...`) —
+   DEAD.** Every current project fails the push. Both build files now
+   target Artifact Registry
+   (`us-central1-docker.pkg.dev/${PROJECT_ID}/agentos/...`); the frontend
+   build no longer targets the `veyrune` repository. Create the repo
+   once: `gcloud artifacts repositories create agentos
+   --repository-format=docker --location=us-central1`.
+2. **The overlay enabled none of the APIs its own resources need.**
+   `sqladmin`, `compute`, `servicenetworking`, `artifactregistry` are now
+   `google_project_service` resources in the overlay (Cloud SQL, the VPC,
+   private-services access and Artifact Registry all failed at apply).
+3. **The bus transport was `nats` with no NATS deployment** — the API
+   and the worker pool could not exchange a single event. Default is now
+   `pubsub`: `terraform/modules/pubsub` already provisions every topic
+   the app consumes (`agentos-workflow-events`, `agentos-scheduler-triggers`,
+   `agentos-recovery-events`, `agentos-mcp-validation`) plus the
+   `-worker-sub` pull subscriptions, and the overlay now grants the API
+   and worker service accounts `pubsub.publisher/subscriber/viewer`.
+4. **The Cloud SQL DSN relied on IAM token auth the app does not
+   implement** (asyncpg needs a real password; the app never fetches
+   IAM tokens as database passwords). The overlay now generates a
+   password user, assembles the proxy-socket DSN, stores it in Secret
+   Manager (`agenticos-postgres-dsn`) and wires it as a SECRET-BACKED
+   `POSTGRES_DSN` env on both the API and the worker — never a plain
+   var. The Cloud SQL instance also sets `cloudsql.iam_authentication=on`
+   for the supplementary IAM users.
+5. A **frontend Cloud Run service** was added (set `frontend_image`);
+   `api_max_instances` defaults to **1** until the GCS artifact backend
+   exists (a second instance serves downloads from its own filesystem).
+
 ### 4b. Remaining runtime work
 
 The following remain required configuration/implementation and verification:

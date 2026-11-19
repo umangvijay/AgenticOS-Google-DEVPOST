@@ -29,7 +29,8 @@ async def stack(monkeypatch, request):
     if backend == "postgres":
         db = PostgresDatabaseManager("postgresql://agentos:agentos@127.0.0.1:55432/agentos_test",
                                      schema="p26_connector_" + uuid.uuid4().hex)
-        monkeypatch.setattr("backend.repositories.postgres.database.PostgresDatabaseManager", lambda dsn: db)
+        monkeypatch.setattr("backend.repositories.postgres.database.PostgresDatabaseManager",
+                          lambda dsn, **kwargs: db)
     else:
         from backend.tests.test_phase20_firestore_emulator import _require_emulator
         from backend.repositories.firestore.database import FirestoreDB

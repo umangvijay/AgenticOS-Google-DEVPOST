@@ -128,10 +128,16 @@ async def test_worker_duplicate_trigger_handler_skips(db, repo, monkeypatch, cap
 
     monkeypatch.setattr("backend.worker.start_worker", start_worker)
     schedule_repo = type("R", (), {})()   # minimal: claim + history
-    schedule_repo.claim_occurrence = repo.claim_occurrence.__get__(schedule_repo)
+    # The claim/finish implementations must run against the REAL fixture
+    # database. Assign the BOUND methods directly: on Python ≤3.11
+    # `bound_method.__get__(obj)` REBINDS to obj (which has no `.db`, so
+    # the worker saw `'R' object has no attribute 'db'` and nacked every
+    # delivery), while on 3.13+ it returns the original bound method —
+    # an environment-dependent failure, not a product one.
+    schedule_repo.claim_occurrence = repo.claim_occurrence
     schedule_repo.get_schedule = lambda *a, **k: _async({"schedule_id": "s1", "status": "ACTIVE", "user_id": "u1", "name": "n", "goal": "g", "cron_expression": "* * * * *"})
     schedule_repo.get_execution_history = lambda *a, **k: _async([])
-    schedule_repo.finish_occurrence = repo.finish_occurrence.__get__(schedule_repo)
+    schedule_repo.finish_occurrence = repo.finish_occurrence
 
     async def _async(value):
         return value

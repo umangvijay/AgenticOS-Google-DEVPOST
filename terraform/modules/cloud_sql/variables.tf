@@ -48,6 +48,12 @@ variable "iam_user_emails" {
   type        = list(string)
 }
 
+variable "app_user_name" {
+  description = "Application database username (password auth via the proxy)"
+  type        = string
+  default     = "agentos"
+}
+
 variable "deletion_protection" {
   description = "Cloud SQL deletion protection flag"
   type        = bool

@@ -5,10 +5,27 @@ egress path. Tests: allowed destination passes; metadata, private
 ranges, localhost, ungranted hosts, non-HTTPS, and redirect-to-forbidden
 are denied; DNS resolution happens in the broker.
 """
+import socket
+
 import pytest
 
 from backend.runners.egress_broker import (
     EgressBroker, EgressGrant, EgressDeniedError, deny_all)
+
+# example.com's documented A address: the ALLOW-path tests exercise the
+# broker's grant/port/redirect LOGIC, not the network. A deterministic
+# resolver keeps them hermetic (CI runs with --network=none, where real
+# DNS cannot resolve) while the deny-on-resolution-failure path keeps
+# explicit coverage below.
+_PUBLIC_EXAMPLE = [("93.184.216.34", 0)]
+
+
+def _patch_public_resolver(monkeypatch):
+    """Replace the OS resolver with a deterministic public answer."""
+    import backend.runners.egress_broker as eb
+    monkeypatch.setattr(
+        eb.socket, "getaddrinfo",
+        lambda host, port, *a, **k: [(None, None, None, "", _PUBLIC_EXAMPLE[0])])
 
 
 def test_default_profile_denies_everything():
@@ -41,10 +58,27 @@ def test_ungranted_public_host_denied():
         broker.validate_url("https://other.example.net/v1")
 
 
-def test_granted_public_host_passes_validation():
+def test_granted_public_host_passes_validation(monkeypatch):
+    _patch_public_resolver(monkeypatch)
     broker = EgressBroker(EgressGrant(allowed=[("example.com", 443)]))
     scheme, host, port = broker.validate_url("https://example.com/v1/data")
     assert (scheme, host, port) == ("https", "example.com", 443)
+
+
+def test_resolution_failure_denies_even_granted_hosts(monkeypatch):
+    """§27.3 fail-closed: when the broker cannot resolve a destination
+    (offline CI, DNS outage), a GRANTED host is still denied — the
+    sandbox never sends traffic to an unverified address."""
+    import backend.runners.egress_broker as eb
+
+    def _no_dns(*a, **k):
+        # getaddrinfo's actual offline failure mode is socket.gaierror
+        # (Errno -3, temporary failure in name resolution).
+        raise socket.gaierror(-3, "Temporary failure in name resolution")
+    monkeypatch.setattr(eb.socket, "getaddrinfo", _no_dns)
+    broker = EgressBroker(EgressGrant(allowed=[("example.com", 443)]))
+    with pytest.raises(EgressDeniedError):
+        broker.validate_url("https://example.com/v1")
 
 
 def test_non_https_denied():
@@ -108,9 +142,10 @@ def test_dns_resolution_happens_in_the_broker(monkeypatch):
         broker.validate_url("https://internal.example.com/x")
 
 
-def test_grant_is_port_specific():
+def test_grant_is_port_specific(monkeypatch):
     """§27.3: a grant for host:443 does NOT authorize host:8443 — the
     requested port is what the grant must cover (audit finding)."""
+    _patch_public_resolver(monkeypatch)
     broker = EgressBroker(EgressGrant(allowed=[("example.com", 443)]))
     with pytest.raises(EgressDeniedError):
         broker.validate_url("https://example.com:8443/v1")
@@ -118,7 +153,8 @@ def test_grant_is_port_specific():
     broker.validate_url("https://example.com/v1")
 
 
-def test_granted_port_explicit_form():
+def test_granted_port_explicit_form(monkeypatch):
+    _patch_public_resolver(monkeypatch)
     broker = EgressBroker(EgressGrant(allowed=[("example.com", 8443)]))
     scheme, host, port = broker.validate_url("https://example.com:8443/v1")
     assert (host, port) == ("example.com", 8443)

@@ -94,7 +94,7 @@ class ResumeRendererService:
         from weasyprint import HTML
 
         pdf_buffer = io.BytesIO()
-        HTML(string=html_string).write_pdf(pdf_buffer)
+        HTML(string=html_string).write_pdf(pdf_buffer, full_fonts=True)
         
         pdf_bytes = pdf_buffer.getvalue()
         pdf_buffer.close()

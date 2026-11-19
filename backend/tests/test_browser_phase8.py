@@ -162,14 +162,16 @@ async def test_activity_extends_idle_never_absolute(repo):
     """§8.10 acceptance: a session cannot remain alive indefinitely merely
     because its preview stream is open — heartbeats never extend the
     absolute lifetime."""
+    now = int(time.time())
+    absolute_expiry = now + 300
     await repo.create_session(_session(
         resource_state=ResourceState.READY,
-        idle_expires_at=int(time.time()) + 60,
-        absolute_expires_at=int(time.time()) + 300))
+        idle_expires_at=now + 60,
+        absolute_expires_at=absolute_expiry))
     await repo.record_activity("bs_test", extend_idle_seconds=600)
     session = await repo.get_session("bs_test")
-    assert session.idle_expires_at > int(time.time()) + 500
-    assert session.absolute_expires_at == int(time.time()) + 300  # unchanged
+    assert session.idle_expires_at > now + 500
+    assert session.absolute_expires_at == absolute_expiry  # unchanged
 
 
 @pytest.mark.asyncio

@@ -168,10 +168,13 @@ class SQLiteMCPRepository(BaseMCPRepository):
         await conn.commit()
         return cursor.rowcount > 0
 
-    async def cache_tools(self, mcp_id: str, tools: List[Dict[str, Any]]) -> None:
+    async def cache_tools(self, mcp_id: str, tools: List[Dict[str, Any]], *, replace_all: bool = True) -> None:
         conn = await self.db.connection()
-        # Clear existing cache for this MCP
-        await conn.execute("DELETE FROM mcp_tools WHERE mcp_id = ?", (mcp_id,))
+        if replace_all:
+            await conn.execute("DELETE FROM mcp_tools WHERE mcp_id = ?", (mcp_id,))
+        else:
+            await conn.executemany("DELETE FROM mcp_tools WHERE mcp_id = ? AND tool_name = ?",
+                                   [(mcp_id, tool["tool_name"]) for tool in tools])
         # Insert new tools
         for tool in tools:
             auth_reqs = tool.get("auth_requirements", [])

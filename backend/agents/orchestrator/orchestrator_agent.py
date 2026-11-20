@@ -99,6 +99,8 @@ def get_orchestrator_agent(tool_router=None, catalog_json: str = "[]", memory_re
         # Imported at function scope so the admission-denial handler below
         # can match the type even if the failure precedes the in-try import.
         from backend.services.connector_build_service import BuildAdmissionDenied
+        from backend.services.approvals_engine import ApprovalsEngine, ApprovalRequiredException
+        from backend.models.security import AutonomyLevel, RiskLevel
         if not tool_router:
             raise RuntimeError("ToolRouter not initialized")
         source = api_docs_url_or_description.strip()
@@ -107,7 +109,9 @@ def get_orchestrator_agent(tool_router=None, catalog_json: str = "[]", memory_re
         except Exception:
             registered = []
         existing = existing_integration_tools(registered, name, source)
-        if existing:
+        required = _parse_required_operations(required_operations)
+        available = {tool.get("name") for tool in existing}
+        if existing and set(required or []).issubset(available):
             return json.dumps({
                 "status": "already_registered",
                 "message": "A matching integration is already registered; use it instead of building a duplicate.",
@@ -115,11 +119,6 @@ def get_orchestrator_agent(tool_router=None, catalog_json: str = "[]", memory_re
             })
         await _progress(f"Building MCP integration: {name or source[:60]}")
         try:
-            from backend.agents.mcp_factory.mcp_factory_agent import MCPFactoryAgent
-            factory_agent = MCPFactoryAgent(
-                tool_router.mcp_repo,
-                secrets_repo=getattr(tool_router, "secrets_repo", None),
-            )
             from backend.mcp.website_mcp import looks_like_website_without_api
             if looks_like_website_without_api(
                 source, url=source if source.startswith(("http://", "https://")) else None
@@ -155,16 +154,12 @@ def get_orchestrator_agent(tool_router=None, catalog_json: str = "[]", memory_re
                 # §14.H: the ORIGINAL task's operation needs propagate —
                 # a task-initiated build never silently declares empty
                 # coverage of what the task was trying to do.
-                required_operations=_parse_required_operations(
-                    required_operations),
+                required_operations=required,
             )
             build_id = dispatch["build_id"]
             # Park the parent task as a durable approval. The arguments carry
             # the build linkage; the worker approves+resumes when the queued
             # build completes (v5.6 A10).
-            from backend.services.approvals_engine import ApprovalsEngine, ApprovalRequiredException
-            from backend.models.schemas import RiskLevel
-            from backend.models.security import AutonomyLevel
             pending = ApprovalsEngine().create_approval_request(
                 user_id=user_id,
                 tool_name="build_integration",
@@ -189,11 +184,8 @@ def get_orchestrator_agent(tool_router=None, catalog_json: str = "[]", memory_re
                 "the workflow resumes automatically when it is ready.",
                 pending,
             )
-            # §4.12 #6: the previous inline-build result handling here was
-            # UNREACHABLE (the raise above parks the task as a durable
-            # approval; the queued build lands and the worker resumes the
-            # parent). Credential attachment for a queued build is applied by
-            # the build executor from the build record's credential reference.
+        except ApprovalRequiredException:
+            raise
         except BuildAdmissionDenied as denied:
             # Phase 3 §3.16: an agent-requested build denied by the SAME
             # admission controls as user work must surface as an honest,

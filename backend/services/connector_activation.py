@@ -35,7 +35,7 @@ async def activate_revision(
     repo, *, mcp_id: str, candidate_revision_id: str,
     expected_current_revision_id: Optional[str],
     eligibility_allowed: bool, eligibility_reasons: Optional[list] = None,
-    actor: str = "system",
+    actor: str = "system", browser_ready: bool = False,
 ) -> Dict[str, Any]:
     """Atomic, eligibility-checked activation (§6.14).
 
@@ -53,7 +53,7 @@ async def activate_revision(
 
     if callable(getattr(repo, "activate_revision_atomic", None)):
         return await repo.activate_revision_atomic(mcp_id, candidate_revision_id,
-                                                   expected_current_revision_id, actor)
+                                                   expected_current_revision_id, actor, **({"browser_ready": True} if browser_ready else {}))
 
     conn = await repo.db.connection()
     try:
@@ -77,6 +77,10 @@ async def activate_revision(
                 f"Active revision changed: expected "
                 f"{expected_current_revision_id}, current {current}")
 
+        if not manifest_row:
+            raise ValueError("Connector was deleted before activation")
+        if browser_ready:
+            await conn.execute("UPDATE mcps SET trust_tier='browser_ready' WHERE mcp_id=?", (mcp_id,))
         await conn.execute(
             "UPDATE mcps SET active_revision_id=?, updated_at=? WHERE mcp_id=?",
             (candidate_revision_id, datetime.now(timezone.utc).isoformat(), mcp_id))

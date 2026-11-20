@@ -729,8 +729,29 @@ export async function toggleSchedulePause(id: string) {
 
 // ── Settings ─────────────────────────────────────────────────────
 
+export interface ModelCatalogEntry {
+  id: string;
+  name: string;
+  family: string;
+  lifecycle: string;
+  selectable: boolean;
+  access: string;
+  reason: string;
+  note: string;
+  retirement_date: string;
+  documentation: string;
+}
+
+export interface ModelCatalog {
+  models: ModelCatalogEntry[];
+  provider: string;
+  default_model: string;
+  documentation_checked: string;
+  auth_mode: string;
+}
+
 export async function getSettings() {
-  return apiFetch<{ settings: UserSettings; available_models?: string[] }>("/settings");
+  return apiFetch<{ settings: UserSettings; available_models?: string[]; model_catalog?: ModelCatalog }>("/settings");
 }
 
 export async function updateSettings(data: Partial<UserSettings>) {
@@ -839,33 +860,37 @@ export async function generateProject(brief: string, kind = "website", name = ""
     },
     onerror() { controller.abort(); },
   }).catch(() => {});
+  type Job = GenerateProgress & {
+    error?: string | null;
+    result?: {
+      artifact_id: string;
+      name: string;
+      summary: string;
+      files: string[];
+      entrypoint: string;
+      kind: string;
+      scale?: string;
+    } | null;
+  };
   try {
-  const deadline = Date.now() + 30 * 60 * 1000;
-  while (Date.now() < deadline) {
-    const job = await apiFetch<{
-      job_id: string;
-      status: string;
-      error?: string | null;
-      result?: {
-        artifact_id: string;
-        name: string;
-        summary: string;
-        files: string[];
-        entrypoint: string;
-        kind: string;
-        scale?: string;
-      } | null;
-    }>(`/capabilities/generate/${jobId}`);
-    onProgress?.(job);
-    if (job.status === "completed" && job.result) {
-      return job.result;
+    const deadline = Date.now() + 30 * 60 * 1000;
+    let readFailures = 0;
+    while (Date.now() < deadline) {
+      let job: Job;
+      try {
+        job = await apiFetch<Job>(`/capabilities/generate/${jobId}`);
+        readFailures = 0;
+      } catch (err) {
+        if (!(err instanceof ApiError) || !err.status || err.status < 500 || ++readFailures > 3) throw err;
+        await new Promise(resolve => setTimeout(resolve, 1000 * readFailures));
+        continue;
+      }
+      onProgress?.(job);
+      if (job.status === "completed" && job.result) return job.result;
+      if (job.status === "failed") throw new Error(job.error || "Generation failed");
+      await new Promise(resolve => setTimeout(resolve, 2500));
     }
-    if (job.status === "failed") {
-      throw new Error(job.error || "Generation failed");
-    }
-    await new Promise((r) => setTimeout(r, 2500));
-  }
-  throw new Error(`Generation is still running (job ${jobId}). Check its saved status before starting another job.`);
+    throw new Error(`Couldn’t confirm the result of job ${jobId}. Check its saved status before starting another job.`);
   } finally { controller.abort(); }
 }
 

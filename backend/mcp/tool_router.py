@@ -96,13 +96,16 @@ class ToolRouter:
     async def get_tool_catalog(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         tools = await self.mcp_repo.get_cached_tools()
         catalog = []
+        manifests = {}  # One registry read per connector for this request.
         for raw in tools:
             try:
                 tool = _as_tool(raw)
-                mcp_raw = await self.mcp_repo.get_mcp(tool.mcp_id)
-                if not mcp_raw:
+                if tool.mcp_id not in manifests:
+                    record = await self.mcp_repo.get_mcp(tool.mcp_id)
+                    manifests[tool.mcp_id] = _as_manifest(record) if record else None
+                mcp = manifests[tool.mcp_id]
+                if mcp is None:
                     continue
-                mcp = _as_manifest(mcp_raw)
                 if user_id and mcp.owner not in (user_id, "system"):
                     continue
                 if not mcp.is_enabled:

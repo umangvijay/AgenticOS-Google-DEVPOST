@@ -215,6 +215,13 @@ def extract_emails(text: str) -> List[str]:
 def _mcp_tasks(text: str, url: Optional[str], prior_goal: str = "") -> List[TaskDefinition]:
     haystack = "\n".join(p for p in (text, prior_goal) if p).strip()
     lowered = (text or "").lower()
+    if not url and len(detect_named_apps(haystack)) <= 1 and not re.search(r"\b(api|openapi|swagger|rest|endpoint)\b", lowered):
+        if re.search(r"\b(youtube music|yt music)\b", lowered):
+            url = "https://music.youtube.com/"
+        elif re.search(r"\b(youtube|yt)\b", lowered):
+            url = "https://www.youtube.com/"
+        if url:
+            haystack += "\nWebsite: " + url
     spec_url = bool(
         url and (
             "openapi" in lowered
@@ -310,6 +317,12 @@ def plan_from_goal(goal: str, prior_goal: str = "", catalog: Optional[Sequence[A
     text = (goal or "").strip()
     if not text:
         return None
+    mention = re.fullmatch(r"@([A-Za-z0-9_][A-Za-z0-9_.-]*)\s+(.+)", text, flags=re.DOTALL)
+    if mention:
+        # The worker resolves the ID against enabled plugins visible to this user.
+        task = _orchestrator_task(mention.group(2).strip())
+        task.agent_id = mention.group(1)
+        return WorkflowDefinition(tasks=[task])
     lowered = text.lower().strip(" ?.!")
     url = _url(text)
     haystack = f"{text}\n{prior_goal or ''}"

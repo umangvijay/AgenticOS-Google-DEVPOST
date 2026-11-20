@@ -13,17 +13,10 @@ const COLORS: Record<string, string> = {
   memory: "#d8858f",
 };
 
-function formatTokens(n: number) {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}K`;
-  return String(n);
-}
-
 export default function ContextUsageButton() {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<ContextUsage | null>(null);
   const [error, setError] = useState("");
-  const [noKey, setNoKey] = useState(false);
   const [pos, setPos] = useState({ top: 64, right: 16 });
   const ref = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -37,49 +30,33 @@ export default function ContextUsageButton() {
 
   const load = useCallback(async () => {
     try {
+      const usage = await getContextUsage();
+      setData(usage);
       setError("");
-      setData(await getContextUsage());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load usage");
     }
   }, []);
 
   useEffect(() => {
-    // load() commits fetched data after the API promise resolves.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    load();
-    (async () => {
-      try {
-        const res = await fetch("/api/v1/health");
-        const h = await res.json();
-        const status = h?.llm_status?.status;
-        setNoKey(status === "missing" || h?.llm === "unset");
-      } catch { /* health unreachable — keep estimate view */ }
-    })();
-    const id = setInterval(load, 20000);
-    return () => clearInterval(id);
-  }, [load]);
-
-  useEffect(() => {
     if (!open) return;
-    // Opening the panel triggers asynchronous data refresh and geometry sync.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    load();
-    place();
+    const id = setInterval(load, 20000);
     const onClick = (e: MouseEvent) => {
       const t = e.target as Node;
-      if (ref.current?.contains(t) || panelRef.current?.contains(t)) return;
-      setOpen(false);
+      if (!ref.current?.contains(t) && !panelRef.current?.contains(t)) setOpen(false);
     };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
     window.addEventListener("resize", place);
     document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
     return () => {
+      clearInterval(id);
       window.removeEventListener("resize", place);
       document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
     };
   }, [open, load, place]);
 
-  const pct = data?.percent ?? 0;
   const used = data?.context_estimate ?? 0;
   const windowTokens = data?.window_tokens ?? 256000;
   const remaining = data?.remaining_tokens ?? Math.max(0, windowTokens - used);
@@ -88,42 +65,13 @@ export default function ContextUsageButton() {
     <div ref={ref} style={{ position: "relative" }}>
       <button
         className="btn btn-ghost btn-sm context-usage-trigger"
-        onClick={() => { place(); setOpen((v) => !v); }}
-        aria-label={data
-          ? `Estimated context ${used.toLocaleString()} of ${windowTokens.toLocaleString()} tokens`
-          : error ? "Context estimate unavailable" : "Loading context estimate"}
-        title={data
-          ? `Estimated context ${used.toLocaleString()} of ${windowTokens.toLocaleString()} tokens`
-          : error ? "Context estimate unavailable" : "Loading context estimate"}
+        onClick={() => { place(); if (!open) void load(); setOpen((v) => !v); }}
+        aria-label="Context usage"
+        aria-expanded={open}
+        title="Context usage details"
         style={{ gap: 8, fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}
       >
-        <span
-          style={{
-            width: 52, height: 6, borderRadius: 99, background: "var(--bg-tertiary)",
-            overflow: "hidden", display: "inline-block", border: "1px solid var(--border-primary)",
-          }}
-        >
-          <span
-            style={{
-              display: "block", height: "100%", width: `${pct > 0 ? Math.max(0.8, Math.min(pct, 100)) : 0}%`,
-              background: pct > 85
-                ? "var(--error)"
-                : "linear-gradient(90deg, var(--accent-purple), var(--accent))",
-              transition: "width 0.6s cubic-bezier(0.22, 1, 0.36, 1)",
-            }}
-          />
-        </span>
-        <span className="context-usage-label" aria-live="polite">
-          {noKey ? (
-            <span style={{ color: "var(--warm)" }}>No API key · add one in Settings</span>
-          ) : data ? (
-            <>Context ~{formatTokens(used)} / {formatTokens(windowTokens)}
-              <span style={{ color: "var(--text-tertiary)", marginLeft: 6 }}>
-                ({pct > 0 && pct < 1 ? pct.toFixed(1) : Math.round(pct)}%)
-              </span>
-            </>
-          ) : error ? "Context unavailable" : "Context loading"}
-        </span>
+        Context
       </button>
 
       {open && typeof document !== "undefined" && createPortal(
@@ -142,18 +90,6 @@ export default function ContextUsageButton() {
           </div>
 
           {error && <p style={{ color: "var(--error)", fontSize: 13 }}>{error}</p>}
-          {noKey && (
-            <p style={{
-              margin: "0 0 12px", padding: "10px 12px", borderRadius: 10, fontSize: 12.5, lineHeight: 1.5,
-              border: "1px solid color-mix(in srgb, var(--warm) 45%, transparent)",
-              background: "color-mix(in srgb, var(--warm) 8%, transparent)",
-              color: "var(--text-secondary)",
-            }}>
-              No model API key configured. Token usage is 0 — the figures below
-              are size-based estimates of what a run <em>would</em> occupy, not
-              anything spent. Add a key in Settings to start real usage.
-            </p>
-          )}
           {!data && !error && <div className="skeleton" style={{ height: 80 }} />}
 
           {data && (
@@ -179,7 +115,7 @@ export default function ContextUsageButton() {
                 ))}
               </div>
               <p style={{ margin: "0 0 14px", fontSize: 12, color: "var(--text-tertiary)", fontFamily: "var(--font-mono)" }}>
-                Current prompt context · about {used.toLocaleString()} / {windowTokens.toLocaleString()} tokens ({pct}%)
+                Current prompt context · about {used.toLocaleString()} / {windowTokens.toLocaleString()} tokens ({data.percent}%)
               </p>
               <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
                 {data.categories.map((c) => (

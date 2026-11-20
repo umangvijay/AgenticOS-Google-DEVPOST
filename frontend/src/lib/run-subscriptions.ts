@@ -1,107 +1,116 @@
 "use client";
 
-/**
- * One owner for run subscriptions (Phase 18 §18.14, finding F4).
- * Reference-counted per run: the timeline, graph, and evidence panels
- * all consume the SAME subscription instead of each opening one. A
- * fallback poller runs only while the stream is down, coordinated —
- * never competing.
- */
+/** One stream and one snapshot reconciler per run, shared by every consumer. */
 import { subscribeWorkflowEvents, getWorkflow } from "./api";
 import type { WorkflowEvent, WorkflowRun } from "./api";
 
 type Listener = (payload: { event: WorkflowEvent | null; run: WorkflowRun | null }) => void;
-
 interface Subscription {
   runId: string;
   listeners: Set<Listener>;
   unsubscribeStream: (() => void) | null;
   pollTimer: ReturnType<typeof setInterval> | null;
   lastEventAt: number;
+  fetching: boolean;
+  dirty: boolean;
+  terminalEvent: boolean;
+  stopped: boolean;
+  snapshot: WorkflowRun | null;
 }
-
 const subscriptions = new Map<string, Subscription>();
-const STREAM_SILENCE_MS = 20_000;   // heartbeat policy: poll after silence
-const POLL_MS = 5_000;
+const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED", "NEEDS_REVIEW", "EXPIRED"]);
+const STREAM_SILENCE_MS = 10_000;
+const POLL_MS = 2_500;
 
-function startStream(sub: Subscription): void {
-  if (sub.unsubscribeStream) return;
-  sub.lastEventAt = Date.now();
+function stopTransport(sub: Subscription) {
+  sub.unsubscribeStream?.();
+  sub.unsubscribeStream = null;
+  if (sub.pollTimer) clearInterval(sub.pollTimer);
+  sub.pollTimer = null;
+}
+
+async function reconcile(sub: Subscription): Promise<void> {
+  if (sub.stopped) return;
+  if (sub.fetching) { sub.dirty = true; return; }
+  sub.fetching = true;
   try {
-    const stop = subscribeWorkflowEvents(
-      sub.runId,
-      (event: WorkflowEvent) => {
-        sub.lastEventAt = Date.now();
-        for (const listener of sub.listeners) {
-          listener({ event, run: null });
-        }
-      },
-      () => { /* open */ },
-      (err: Error) => {
-        // §18.16: transient errors start the coordinated fallback
-        // poller; definitive access loss stops the subscription.
-        if (!/expired|sign in|401|403/i.test(err.message)) {
-          startPoller(sub);
-        }
-      },
-    );
-    sub.unsubscribeStream = stop;
+    const run = await getWorkflow(sub.runId);
+    if (sub.stopped) return;
+    // An event arriving during this read may refer to a newer persisted
+    // version. Read again before publishing, rather than reverting the UI.
+    if (sub.dirty) return;
+    sub.snapshot = run;
+    for (const listener of sub.listeners) listener({ event: null, run });
+    // Wait for the terminal event too, so reopening a finished run can
+    // replay its timeline before closing the stream.
+    if (TERMINAL.has(run.status) && (sub.terminalEvent || Date.now() - sub.lastEventAt >= STREAM_SILENCE_MS)) stopTransport(sub);
   } catch {
-    startPoller(sub);
+    // The watchdog retries failed reads, even if the final event closed SSE.
+    sub.lastEventAt = 0;
+  } finally {
+    sub.fetching = false;
+    if (sub.dirty && !sub.stopped) {
+      sub.dirty = false;
+      void reconcile(sub);
+    }
   }
 }
 
-function startPoller(sub: Subscription): void {
-  if (sub.pollTimer) return;
-  sub.pollTimer = setInterval(async () => {
-    // §18.14: the poller is COORDINATED — it yields while the stream
-    // is delivering (recent event) and reconciles after silence.
-    if (Date.now() - sub.lastEventAt < STREAM_SILENCE_MS) return;
-    try {
-      const run = await getWorkflow(sub.runId);
-      for (const listener of sub.listeners) {
-        listener({ event: null, run });
-      }
-    } catch {
-      /* the next tick retries; errors do not kill the poller */
-    }
+function start(sub: Subscription) {
+  sub.lastEventAt = Date.now();
+  // Always watch for silent disconnects, not only explicit stream errors.
+  sub.pollTimer = setInterval(() => {
+    if (!sub.fetching && (sub.terminalEvent || Date.now() - sub.lastEventAt >= STREAM_SILENCE_MS)) void reconcile(sub);
   }, POLL_MS);
-}
-
-function stopIfUnused(sub: Subscription): void {
-  if (sub.listeners.size === 0) {
-    if (sub.unsubscribeStream) {
-      sub.unsubscribeStream();
-      sub.unsubscribeStream = null;
-    }
-    if (sub.pollTimer) {
-      clearInterval(sub.pollTimer);
-      sub.pollTimer = null;
-    }
-    subscriptions.delete(sub.runId);
+  try {
+    sub.unsubscribeStream = subscribeWorkflowEvents(sub.runId, event => {
+      if (sub.stopped) return;
+      sub.lastEventAt = Date.now();
+      if (event.type.startsWith("WORKFLOW_") && TERMINAL.has(event.type.slice(9))) sub.terminalEvent = true;
+      for (const listener of sub.listeners) listener({ event, run: null });
+      // Event metadata can omit or redact output. Fetch the saved tasks;
+      // never infer the assistant's answer from a completion notification.
+      if (/^(TASK_|WORKFLOW_|APPROVAL_)/.test(event.type)) void reconcile(sub);
+    }, () => { void reconcile(sub); }, err => {
+      if (sub.stopped) return;
+      const message = err instanceof Error ? err.message : String(err);
+      if (/expired|sign in|401|403/i.test(message)) {
+        sub.stopped = true;
+        stopTransport(sub);
+        return;
+      }
+      sub.lastEventAt = 0;
+      void reconcile(sub);
+    });
+  } catch {
+    sub.lastEventAt = 0;
   }
+  void reconcile(sub);
 }
 
-/** Subscribe to a run. Returns an unsubscribe that cleans up THIS
-  consumer's reference (Strict Mode's double setup/cleanup cycle is
-  safe: the second setup re-subscribes the same refcount). */
-export function subscribeRun(runId: string,
-                             listener: Listener): () => void {
+export function subscribeRun(runId: string, listener: Listener): () => void {
   let sub = subscriptions.get(runId);
   if (!sub) {
-    sub = { runId, listeners: new Set(), unsubscribeStream: null,
-            pollTimer: null, lastEventAt: 0 };
+    sub = { runId, listeners: new Set([listener]), unsubscribeStream: null,
+      pollTimer: null, lastEventAt: 0, fetching: false, dirty: false,
+      terminalEvent: false, stopped: false, snapshot: null };
     subscriptions.set(runId, sub);
-    startStream(sub);
+    start(sub);
+  } else {
+    sub.listeners.add(listener);
+    if (sub.snapshot) listener({ event: null, run: sub.snapshot });
   }
-  sub.listeners.add(listener);
+  const owned = sub;
   return () => {
-    sub.listeners.delete(listener);
-    stopIfUnused(sub);
+    owned.listeners.delete(listener);
+    if (owned.listeners.size === 0) {
+      owned.stopped = true;
+      stopTransport(owned);
+      subscriptions.delete(runId);
+    }
   };
 }
 
-/** Test/diagnostic helper: the live subscription count per run. */
 export function subscriptionCount(runId: string): number {
   return subscriptions.get(runId)?.listeners.size ?? 0;
 }

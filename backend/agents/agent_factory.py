@@ -6,33 +6,41 @@ from backend.models.plugin import PluginAgentDefinition
 from backend.services.runtime_snapshot import RuntimeSnapshotRegistry
 from backend.observability.tracing import get_tracer
 import json
+import re
 import logging
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer(__name__)
 
 class AgentFactory:
-    def __init__(self, snapshot_registry: RuntimeSnapshotRegistry, tool_router):
+    def __init__(self, snapshot_registry: RuntimeSnapshotRegistry, tool_router, plugin_repo=None):
         self.snapshot_registry = snapshot_registry
         self.tool_router = tool_router
+        self.plugin_repo = plugin_repo
 
-    def build_agent(self, agent_id: str, context: Optional[Dict[str, Any]] = None, model: Optional[str] = None) -> Optional[LlmAgent]:
+    async def build_for_run(self, agent_id, context, model):
+        # The API processes and worker do not share an in-memory snapshot.
+        records = await self.plugin_repo.list_all(context["user_id"]) if self.plugin_repo is not None else None
+        return self.build_agent(agent_id, context=context, model=model, records=records)
+
+    def build_agent(self, agent_id: str, context: Optional[Dict[str, Any]] = None, model: Optional[str] = None, *, records=None) -> Optional[LlmAgent]:
         """
         Dynamically constructs an ADK LlmAgent based on the active runtime snapshot.
         """
         with tracer.start_as_current_span(f"agent_factory.build_agent:{agent_id}") as span:
             span.set_attribute("agent.id", agent_id)
             
-            snapshot = self.snapshot_registry.get_snapshot()
+            if records is None:
+                records = self.snapshot_registry.get_snapshot().active_plugins
             user_id = (context or {}).get("user_id")
-            eligible_plugins = [record for record in snapshot.active_plugins
+            eligible_plugins = [record for record in records
                                 if record.state.value == "ENABLED"
                                 and (record.manifest.scope.value != "USER" or record.installed_by == user_id)]
             definitions = [agent for record in eligible_plugins for agent in record.manifest.agents]
             agent_def = next((a for a in definitions if a.agent_id == agent_id), None)
             
             if not agent_def:
-                logger.warning(f"Agent {agent_id} not found in current snapshot v{snapshot.version}")
+                logger.warning("Agent %s is unavailable for this run", agent_id)
                 return None
                 
             llm = adk_gemini(candidate_models(model)[0])
@@ -60,7 +68,8 @@ class AgentFactory:
                 agent_tools.append(call_plugin_tool)
                 
             return LlmAgent(
-                name=agent_def.display_name,
+                name="plugin_" + re.sub(r"[^a-zA-Z0-9_]", "_", agent_def.agent_id),
+                description=agent_def.display_name,
                 instruction=agent_def.instructions,
                 model=llm,
                 tools=agent_tools

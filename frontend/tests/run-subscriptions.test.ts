@@ -1,0 +1,98 @@
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { subscribeRun, subscriptionCount } from "@/lib/run-subscriptions";
+import { getWorkflow, subscribeWorkflowEvents } from "@/lib/api";
+import type { WorkflowRun, WorkflowEvent } from "@/lib/api";
+vi.mock("@/lib/api", () => ({ getWorkflow: vi.fn(), subscribeWorkflowEvents: vi.fn() }));
+let emit: (event: WorkflowEvent) => void;
+let opened: () => void;
+let fail: (e: Error) => void;
+const stopStream = vi.fn();
+const stops: (() => void)[] = [];
+const run = (status = "RUNNING"): WorkflowRun => ({ run_id: "r", workflow_id: "w", user_id: "u", goal: "hello", status, tasks: [], created_at: "2026-11-19" });
+const completed = (): WorkflowEvent => ({ event_id: "done", type: "WORKFLOW_COMPLETED", run_id: "r", workflow_id: "w", timestamp: "", summary: "Completed", sanitized_metadata: {} });
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.mocked(getWorkflow).mockResolvedValue(run());
+  vi.mocked(subscribeWorkflowEvents).mockImplementation((_id, onEvent, onOpen, onError) => {
+    emit = onEvent; opened = onOpen!; fail = onError!; return stopStream;
+  });
+});
+afterEach(() => { stops.splice(0).forEach(stop => stop()); vi.useRealTimers(); vi.resetAllMocks(); });
+it("shares transport, fetches the saved reply on completion without output metadata, and stops", async () => {
+  const first = vi.fn(), second = vi.fn();
+  stops.push(subscribeRun("r", first), subscribeRun("r", second));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(subscribeWorkflowEvents).toHaveBeenCalledTimes(1);
+  expect(subscriptionCount("r")).toBe(2);
+  const final = { ...run("COMPLETED"), tasks: [{ task_id: "chat", workflow_id: "w", run_id: "r", agent: "core.chat", input_data: {}, dependencies: [], attempt: 1, status: "COMPLETED", output_data: { reply: "Saved answer" } }] } as WorkflowRun;
+  vi.mocked(getWorkflow).mockResolvedValue(final);
+  emit(completed());
+  await vi.advanceTimersByTimeAsync(0);
+  expect(first).toHaveBeenLastCalledWith({ event: null, run: final });
+  expect(second).toHaveBeenLastCalledWith({ event: null, run: final });
+  expect(stopStream).toHaveBeenCalledOnce();
+  const reads = vi.mocked(getWorkflow).mock.calls.length;
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(getWorkflow).toHaveBeenCalledTimes(reads);
+});
+it("retries an older-server terminal-event race and a failed final read", async () => {
+  const listener = vi.fn(); stops.push(subscribeRun("r", listener));
+  await vi.advanceTimersByTimeAsync(0);
+  vi.mocked(getWorkflow).mockRejectedValueOnce(new Error("temporary"));
+  emit(completed());
+  await vi.advanceTimersByTimeAsync(2500);
+  expect(stopStream).not.toHaveBeenCalled();
+  vi.mocked(getWorkflow).mockResolvedValue(run("COMPLETED"));
+  await vi.advanceTimersByTimeAsync(2500);
+  expect(listener).toHaveBeenLastCalledWith({ event: null, run: run("COMPLETED") });
+  expect(stopStream).toHaveBeenCalledOnce();
+});
+it("reconciles silent streams and reconnects, with no overlapping reads", async () => {
+  stops.push(subscribeRun("r", vi.fn()));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(getWorkflow).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(getWorkflow).toHaveBeenCalledTimes(2);
+  opened(); await vi.advanceTimersByTimeAsync(0);
+  expect(getWorkflow).toHaveBeenCalledTimes(3);
+  fail(new Error("offline")); await vi.advanceTimersByTimeAsync(0);
+  expect(getWorkflow).toHaveBeenCalledTimes(4);
+});
+it("does not publish a stale read when completion arrives while it is in flight", async () => {
+  let resolve!: (run: WorkflowRun) => void;
+  vi.mocked(getWorkflow).mockReturnValueOnce(new Promise(r => { resolve = r; }));
+  const listener = vi.fn(); stops.push(subscribeRun("r", listener));
+  emit(completed());
+  vi.mocked(getWorkflow).mockResolvedValue(run("COMPLETED"));
+  resolve(run());
+  await vi.advanceTimersByTimeAsync(0);
+  expect(listener).not.toHaveBeenCalledWith({ event: null, run: run() });
+  expect(listener).toHaveBeenLastCalledWith({ event: null, run: run("COMPLETED") });
+});
+it("ignores responses after navigation and stops on access loss", async () => {
+  let resolve!: (run: WorkflowRun) => void;
+  vi.mocked(getWorkflow).mockReturnValueOnce(new Promise(r => { resolve = r; }));
+  const listener = vi.fn(); const stop = subscribeRun("r", listener);
+  stop(); resolve(run()); await vi.advanceTimersByTimeAsync(0);
+  expect(listener).not.toHaveBeenCalled();
+  stops.push(subscribeRun("r", listener));
+  fail(new Error("SSE failed: 403"));
+  await vi.advanceTimersByTimeAsync(0);
+  const reads = vi.mocked(getWorkflow).mock.calls.length;
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(getWorkflow).toHaveBeenCalledTimes(reads);
+});
+it("publishes a slow final read instead of invalidating it on each watchdog tick", async () => {
+  const listener = vi.fn(); stops.push(subscribeRun("r", listener));
+  await vi.advanceTimersByTimeAsync(0);
+  let resolve!: (run: WorkflowRun) => void;
+  vi.mocked(getWorkflow).mockReturnValueOnce(new Promise(r => { resolve = r; }));
+  emit(completed());
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(getWorkflow).toHaveBeenCalledTimes(2);
+  resolve(run("COMPLETED"));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(listener).toHaveBeenLastCalledWith({ event: null, run: run("COMPLETED") });
+  expect(getWorkflow).toHaveBeenCalledTimes(2);
+  expect(stopStream).toHaveBeenCalledOnce();
+});

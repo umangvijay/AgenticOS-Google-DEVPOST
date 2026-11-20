@@ -35,6 +35,22 @@ class SettingsUpdate(BaseModel):
     webhook_url: Optional[str] = None              # outbound run-finished webhook (public HTTPS)
 
 
+def _settings_response(user_settings):
+    from backend.config.settings import settings as app_settings
+    from backend.services.gemini_client import allowed_models
+    from backend.services.gemini_catalog import catalog_payload
+    from backend.services.llm_context import active_llm_provider
+    provider = active_llm_provider()
+    configured = (app_settings.GEMINI_ALLOWED_MODELS.split(",")
+                  if provider in {"gemini", "vertex", "auto"} else allowed_models())
+    enabled = allowed_models()
+    default_model = (app_settings.GEMINI_MODEL if provider in {"gemini", "vertex", "auto"}
+                     else (enabled[0] if enabled else ""))
+    catalog = catalog_payload([m.strip() for m in configured if m.strip()],
+                              provider=provider, default_model=default_model)
+    return {"settings": user_settings, "available_models": allowed_models(), "model_catalog": catalog}
+
+
 @router.get("")
 async def get_settings(
     request: Request,
@@ -43,8 +59,7 @@ async def get_settings(
     """Get the current user's settings."""
     factory = _get_factory(request)
     settings = await factory.settings_repo.get_settings(user.user_id)
-    from backend.services.gemini_client import allowed_models
-    return {"settings": settings, "available_models": allowed_models()}
+    return _settings_response(settings)
 
 
 @router.put("")
@@ -112,8 +127,7 @@ async def update_settings(
         "details": {"updated_fields": list(updates.keys())},
     })
 
-    from backend.services.gemini_client import allowed_models
-    return {"settings": settings, "available_models": allowed_models()}
+    return _settings_response(settings)
 
 
 # ── §21.6: per-user provider credentials + readiness ladder ───────────

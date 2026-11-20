@@ -307,7 +307,7 @@ async def startup_event():
     await plugin_registry.refresh_snapshot()
     app.state.snapshot_registry = snapshot_registry
     app.state.plugin_registry = plugin_registry
-    agent_factory = AgentFactory(snapshot_registry, tool_router)
+    agent_factory = AgentFactory(snapshot_registry, tool_router, plugin_repo=factory.plugin_repo)
     app.state.agent_factory = agent_factory
 
     # 6. Initialize Workflow Engine

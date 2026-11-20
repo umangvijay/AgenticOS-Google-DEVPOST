@@ -8,6 +8,7 @@ and served via the artifacts API. Generated code is never executed.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -30,7 +31,7 @@ ALLOWED_SUFFIXES = {
 }
 MAX_FILES = 60
 MAX_FILE_BYTES = 220_000
-BATCH_SIZE = 6
+BATCH_SIZE = 2
 SAFE_PATH = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 
 
@@ -208,10 +209,17 @@ Only these extensions: {", ".join(sorted(ALLOWED_SUFFIXES))}.
 Every file must be necessary. Prefer a coherent multi-file structure over one giant HTML file.
 """
         plan = await gemini_client.generate_json(plan_prompt)
-        if not isinstance(plan, dict) or not plan.get("files"):
+        planned = plan.get("files") if isinstance(plan, dict) else None
+        if not isinstance(planned, list) or not planned:
             raise ArtifactError("Model returned an invalid project plan")
-
-        planned = [f for f in plan["files"] if isinstance(f, dict) and f.get("path")][:MAX_FILES]
+        if len(planned) > MAX_FILES:
+            raise ArtifactError(f"Project plan exceeds the {MAX_FILES}-file limit")
+        for item in planned:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                raise ArtifactError("Project plan contains an invalid file path")
+            item["path"] = _safe_relpath(item["path"])
+        if len({item["path"] for item in planned}) != len(planned):
+            raise ArtifactError("Project plan contains duplicate file paths")
         generated = []
 
         for i in range(0, len(planned), BATCH_SIZE):
@@ -226,13 +234,35 @@ Do not stub. Match the brief. Return JSON {{"files": [{{"path","content"}}]}} co
 BRIEF:
 {brief[:6000]}
 
+PROJECT FILE MAP:
+{json.dumps(planned)}
+
 Only these paths. Full source in each content field.
 """
-            batch = await gemini_client.generate_json(batch_prompt)
-            if isinstance(batch, dict) and isinstance(batch.get("files"), list):
-                generated.extend(batch["files"])
-            elif isinstance(batch, list):
-                generated.extend(batch)
+            try:
+                batch = await gemini_client.generate_json(batch_prompt)
+            except json.JSONDecodeError:
+                # A truncated batch can still be generated one file at a time.
+                batch = []
+            files = batch.get("files", []) if isinstance(batch, dict) else batch if isinstance(batch, list) else []
+            files = files if isinstance(files, list) else []
+            expected_chunk = {f["path"] for f in chunk}
+            by_path = {f["path"]: f for f in files if isinstance(f, dict)
+                       and isinstance(f.get("path"), str) and f.get("path") in expected_chunk and isinstance(f.get("content"), str) and f["content"].strip()}
+            # Repair only missing files. Never accept a partial project as complete.
+            for item in chunk:
+                if item["path"] not in by_path:
+                    repair = await gemini_client.generate_json(
+                        batch_prompt + "\nReturn ONLY this missing file: " + item["path"])
+                    candidates = repair.get("files", []) if isinstance(repair, dict) else []
+                    for candidate in candidates if isinstance(candidates, list) else []:
+                        if (isinstance(candidate, dict) and candidate.get("path") == item["path"]
+                                and isinstance(candidate.get("content"), str) and candidate["content"].strip()):
+                            by_path[item["path"]] = candidate
+                    if item["path"] not in by_path:
+                        raise ArtifactError("Model did not finish a required file: " + item["path"])
+                generated.append(by_path[item["path"]])
+            await progress("writing_files", len(generated), len(planned))
 
     if not generated:
         raise ArtifactError("Model produced no files")
@@ -262,7 +292,7 @@ Only these paths. Full source in each content field.
     }
     (dest / "artifact.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     logger.info("Generated %s/%s artifact %s (%d files) for user %s", kind, scale, artifact_id, len(written), user_id)
-    _persist_artifact_remote(metadata, dest)
+    await asyncio.to_thread(_persist_artifact_remote, metadata, dest)
     return metadata
 
 
@@ -275,7 +305,7 @@ def _firestore_sync():
     project = settings.GOOGLE_CLOUD_PROJECT
     if not project:
         return None
-    return fs.Client(project=project)
+    return fs.Client(project=project, database=settings.FIRESTORE_DATABASE_ID)
 
 
 def _persist_artifact_remote(metadata: Dict[str, Any], dest: Path) -> None:

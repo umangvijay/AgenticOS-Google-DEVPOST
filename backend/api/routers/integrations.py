@@ -67,13 +67,15 @@ class BuildPythonToolsRequest(BaseModel):
 
 
 def _validated_operation_count(mcp, tools):
-    from backend.services.tool_validation import has_valid_read_probe, credential_binding_id_from, validation_provenance
-    auth = mcp.get("auth") or {}
-    if isinstance(auth, str):
-        import json
-        auth = json.loads(auth)
-    binding = credential_binding_id_from(auth)
-    return sum(has_valid_read_probe(t, mcp.get("spec_hash"), binding) for t in tools)
+    from backend.services.browser_connector_validation import has_valid_browser_probe
+    from backend.services.tool_validation import credential_binding_id_from, has_valid_read_probe
+    binding = credential_binding_id_from(mcp.get("auth") or {})
+    return sum(
+        has_valid_browser_probe(tool, mcp)
+        if (tool.get("operation") or {}).get("kind") == "browser"
+        else has_valid_read_probe(tool, mcp.get("spec_hash"), binding)
+        for tool in tools
+    )
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -410,6 +412,12 @@ async def test_integration(
         if transport == "internal":
             if not tools:
                 raise ValueError("No tools registered for this integration")
+            if mcp.get("source_type") == "website":
+                from backend.services.browser_connector_validation import validate_browser_connector
+                result = await validate_browser_connector(factory.mcp_repo, mcp, tools, user.user_id)
+                await factory.mcp_repo.update_mcp_health(mcp_id, "HEALTHY", datetime.now(timezone.utc))
+                circuit_breaker.record_success(mcp_id)
+                return result
             # Evidence belongs only to the selected operation, never all cached tools.
             probe = {"status": "skipped", "reason": "no parameterless GET tool"}
             for tool in tools:
@@ -427,7 +435,7 @@ async def test_integration(
                     )
                     probe = {"status": "probed", "ok": result.get("ok"), "http_status": result.get("status"), "tool_name": tool.get("tool_name")}
                     if result.get("ok") is True:
-                        from backend.services.tool_validation import record_read_probe
+                        from backend.services.tool_validation import credential_binding_id_from, record_read_probe
                         auth = mcp.get("auth") or {}
                         if isinstance(auth, str):
                             import json
@@ -692,17 +700,11 @@ async def enable_integration(
     mcp = await factory.mcp_repo.get_mcp(mcp_id)
     if not mcp or (mcp.get("owner") not in (user.user_id, "system") and not user.is_admin()):
         raise HTTPException(status_code=404, detail="Integration not found")
-    if mcp.get("trust_tier") != "verified":
+    if mcp.get("trust_tier") not in ("verified", "browser_ready"):
         raise HTTPException(status_code=409, detail="Validate this connector revision before enabling it")
-    from backend.services.tool_validation import has_valid_read_probe, credential_binding_id_from, validation_provenance
-    auth = mcp.get("auth") or {}
-    if isinstance(auth, str):
-        import json
-        auth = json.loads(auth)
     if mcp.get("transport") == "internal":
         tools = await factory.mcp_repo.get_cached_tools(mcp_id=mcp_id)
-        binding = credential_binding_id_from(auth)
-    if not any(has_valid_read_probe(t, mcp.get("spec_hash"), binding) for t in tools):
+        if not _validated_operation_count(mcp, tools):
             raise HTTPException(status_code=409, detail="No operation has current validation evidence; connect credentials and test first")
     await factory.mcp_repo.set_mcp_enabled(mcp_id, True)
     return {"mcp_id": mcp_id, "is_enabled": True}

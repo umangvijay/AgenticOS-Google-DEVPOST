@@ -101,7 +101,7 @@ def _grade(status_code: Optional[int], latency_ms: Optional[float], tls: Dict[st
     return "healthy"
 
 
-async def check_website(url: str, timeout: float = 15.0) -> Dict[str, Any]:
+async def check_website(url: str, timeout: float = 15.0, *, same_origin_only: bool = False) -> Dict[str, Any]:
     """Probe a public website and return a structured health report."""
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
@@ -130,8 +130,12 @@ async def check_website(url: str, timeout: float = 15.0) -> Dict[str, Any]:
                     if resp.is_redirect and resp.headers.get("location"):
                         if hop == 8:
                             raise HealthCheckError("Too many redirects")
+                        destination = resp.url.join(resp.headers["location"])
+                        if same_origin_only and (destination.scheme != "https" or destination.host != host
+                                or (destination.port or 443) != (urlparse(url).port or 443)):
+                            raise HealthCheckError("The page redirected outside the connector’s origin")
                         redirects.append(final_url)
-                        final_url = str(resp.url.join(resp.headers["location"]))
+                        final_url = str(destination)
                         continue
                     status_code = resp.status_code
                     headers = {k.lower(): v for k, v in resp.headers.items()}

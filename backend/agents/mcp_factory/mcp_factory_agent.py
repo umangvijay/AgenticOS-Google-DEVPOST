@@ -422,14 +422,17 @@ class MCPFactoryAgent:
             auth={"type": "NONE"},
             is_enabled=True,
             mcp_id=mcp_id,
+            spec_provenance="inferred_description",
         )
-        summaries = [{"name": t.tool_name, "description": t.description} for t in tools]
-        names = ", ".join(t["name"] for t in summaries[:16])
-        msg = (
-            f"Built {display} with {len(tools)} browser tool{'s' if len(tools) != 1 else ''}: {names}. "
-            f"These run a real browser on {origin} (not a REST API). "
-            "Store a Vault login (username/email + password) and pass credential_name when a tool needs sign-in."
-        )
+        from backend.services.browser_connector_validation import validate_browser_connector
+        manifest = await self.mcp_repo.get_mcp(mcp_id)
+        cached = await self.mcp_repo.get_cached_tools(mcp_id)
+        await self._log(build_id, "Checking browser start pages (task actions remain approval-gated)", logs)
+        check = await validate_browser_connector(self.mcp_repo, manifest, cached, user_id)
+        cached = await self.mcp_repo.get_cached_tools(mcp_id)
+        summaries = [{"name": t["tool_name"], "description": t.get("description", "")} for t in cached]
+        msg = (f"Built {display}. Use {check['tool_name']} to read the public page title and status on {origin}. "
+               "Other proposed actions need their own validation before use.")
         result = {
             "status": "success",
             "message": msg,
@@ -437,7 +440,7 @@ class MCPFactoryAgent:
             "mcp_id": mcp_id,
             "name": display,
             "tools": summaries,
-            "trust_tier": "pending_review",
+            "trust_tier": "browser_ready",
             "kind": "website",
         }
         if build_id:

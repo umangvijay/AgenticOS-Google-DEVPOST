@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState, CSSProperties } from "react";
 import { useParams } from "next/navigation";
-import Link from "next/link";
+import { PanelRight, ChevronRight, SquareTerminal } from "lucide-react";
+import WorkspaceExecutionCard from "@/components/WorkspaceExecutionCard";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
@@ -21,9 +22,7 @@ import { getCommandByRun, cancelCommand, CommandReceipt, getEffectsByRun, Effect
 import UncertainOutcomePanel from "@/components/UncertainOutcomePanel";
 import BudgetUsagePanel from "@/components/BudgetUsagePanel";
 import EvaluationPanel from "@/components/EvaluationPanel";
-import { useRunEvents } from "@/hooks/useRunEvents";
 import ExecutionTimeline from "@/components/ExecutionTimeline";
-import QueueStatusPanel, { QueueState } from "@/components/QueueStatusPanel";
 import RunFeedbackPanel from "@/components/RunFeedbackPanel";
 import WorkspaceBrowserSessions from "@/components/WorkspaceBrowserSessions";
 import { ChatLinkPreviewAnchor, linkifyText, isEligibleHttpUrl } from "@/components/ChatLinkPreview";
@@ -35,15 +34,13 @@ function bubbleStyle(role: "user" | "agent"): CSSProperties {
   if (role === "user") {
     return {
       alignSelf: "flex-end", maxWidth: "min(640px, 92%)",
-      background: "linear-gradient(135deg, var(--accent), var(--accent-pink))",
-      color: "white", borderRadius: "18px 18px 4px 18px", padding: "12px 16px",
+      background: "var(--bg-secondary)", border: "1px solid var(--border-primary)",
+      color: "var(--text-primary)", borderRadius: 20, padding: "12px 16px",
     };
   }
   return {
     alignSelf: "flex-start", maxWidth: "min(720px, 96%)",
-    background: "var(--bg-card)", border: "1px solid var(--border-primary)",
-    borderRadius: "18px 18px 18px 4px", padding: "12px 16px",
-    backdropFilter: "blur(20px)",
+    background: "transparent", padding: "8px 0",
   };
 }
 
@@ -84,11 +81,11 @@ function assistantText(task: Task): string | null {
 }
 
 function isTerminal(status?: string) {
-  return ["COMPLETED", "FAILED", "CANCELLED"].includes(status || "");
+  return ["COMPLETED", "FAILED", "CANCELLED", "NEEDS_REVIEW", "EXPIRED"].includes(status || "");
 }
 
 function isWaitingHuman(workflow: WorkflowRun) {
-  return (workflow.tasks || []).some((t) => t.status === "WAITING_APPROVAL");
+  return !isTerminal(workflow.status) && (workflow.tasks || []).some((t) => t.status === "WAITING_APPROVAL");
 }
 
 function UserBubble({ goal }: { goal: string }) {
@@ -140,21 +137,23 @@ function UserBubble({ goal }: { goal: string }) {
   );
 }
 
-function TurnView({ workflow }: { workflow: WorkflowRun }) {
+function TurnView({ workflow, events, onInspect }: { workflow: WorkflowRun; events: WorkflowEvent[]; onInspect: () => void }) {
   const replies = (workflow.tasks || [])
     .map((t) => ({ task: t, text: t.status === "COMPLETED" ? assistantText(t) : null }))
     .filter((x) => x.text);
   const failed = (workflow.tasks || []).filter((t) => t.status === "FAILED");
-  const inFlight = (workflow.tasks || []).some((t) =>
-    t.status === "RUNNING" || t.status === "PENDING" || t.status === "WAITING" || t.status === "RETRYING"
-  );
-  const busy = (!isTerminal(workflow.status) || inFlight) && replies.length === 0 && failed.length === 0;
+  const busy = !isTerminal(workflow.status) && !isWaitingHuman(workflow) && replies.length === 0 && failed.length === 0;
+
 
   return (
     <>
       <UserBubble goal={workflow.goal} />
+      {(workflow.tasks.length > 0 || events.length > 0) && <details className="turn-activity" onToggle={event => { if (event.currentTarget.open) onInspect(); }}>
+        <summary><SquareTerminal size={15} /><span>{isTerminal(workflow.status) ? "View activity" : "Working"}{workflow.tasks.length ? ` · ${workflow.tasks.length} ${workflow.tasks.length === 1 ? "step" : "steps"}` : ""}</span><ChevronRight size={14} className="disclosure-chevron" /></summary>
+        <ExecutionTimeline events={events} tasks={workflow.tasks} compact />
+      </details>}
       {replies.map(({ task, text }) => (
-        <div key={`${workflow.run_id}-out-${task.task_id}`} style={bubbleStyle("agent")}>
+        <div id={`result-${workflow.run_id}-${task.task_id}`} key={`${workflow.run_id}-out-${task.task_id}`} style={bubbleStyle("agent")}>
           <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 6 }}>Sandtable</div>
           <div className="agent-markdown">
             <ReactMarkdown
@@ -188,7 +187,7 @@ function TurnView({ workflow }: { workflow: WorkflowRun }) {
           <div style={{ fontSize: 14, lineHeight: 1.55 }}>{t.error || "That step failed. Try again or rephrase the goal."}</div>
         </div>
       ))}
-      {(workflow.tasks || []).filter((t) => t.status === "WAITING_APPROVAL").map((t) => (
+      {!isTerminal(workflow.status) && (workflow.tasks || []).filter((t) => t.status === "WAITING_APPROVAL").map((t) => (
         <div key={`${workflow.run_id}-wait-${t.task_id}`} style={bubbleStyle("agent")}>
           <div style={{ fontSize: 11, color: "var(--warning, #b45309)", marginBottom: 6 }}>Waiting on you</div>
           <div style={{ fontSize: 14, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
@@ -198,18 +197,6 @@ function TurnView({ workflow }: { workflow: WorkflowRun }) {
           </div>
         </div>
       ))}
-      {(() => {
-        // §3.19: accepted work shows its REAL queue/run state — backed by
-        // the run id the backend issued, never an invented position.
-        const queueState: QueueState | null = isTerminal(workflow.status)
-          ? (workflow.status === "COMPLETED" ? "completed" : null)
-          : (workflow.status === "RUNNING" ? "running" : "queued");
-        return queueState ? (
-          <div style={{ margin: "8px 0" }}>
-            <QueueStatusPanel state={queueState} runId={workflow.run_id} />
-          </div>
-        ) : null;
-      })()}
       {busy && (
         <div style={bubbleStyle("agent")}>
           <span className="typing-dots" style={{ marginRight: 10 }} aria-hidden>
@@ -218,10 +205,14 @@ function TurnView({ workflow }: { workflow: WorkflowRun }) {
           Thinking…
         </div>
       )}
-      {isTerminal(workflow.status) && workflow.status === "FAILED" && replies.length === 0 && failed.length === 0 && (
-        <div style={bubbleStyle("agent")}>
-          <div style={{ fontSize: 11, color: "var(--error)", marginBottom: 6 }}>Sandtable</div>
-          <div style={{ fontSize: 14, lineHeight: 1.55 }}>That run failed before a reply was written. Try sending again.</div>
+      {isTerminal(workflow.status) && replies.length === 0 && failed.length === 0 && (
+        <div role="status" style={bubbleStyle("agent")}>
+          {workflow.status === "COMPLETED"
+            ? "The run completed without a saved reply. Open Details to inspect its results, or send a follow-up."
+            : workflow.status === "CANCELLED" ? "This run was stopped."
+            : workflow.status === "NEEDS_REVIEW" ? "This run needs review. Open Details to inspect the result."
+            : workflow.status === "EXPIRED" ? "This run expired. You can send your message again."
+            : "That run failed before a reply was written. Try sending again."}
         </div>
       )}
     </>
@@ -230,7 +221,12 @@ function TurnView({ workflow }: { workflow: WorkflowRun }) {
 
 export default function WorkspaceChatPage() {
   const params = useParams();
+  const auth = useAuth();
   const runId = params.run_id as string;
+  return <WorkspaceConversation key={`${auth?.user?.id || "anonymous"}:${runId}`} runId={runId} />;
+}
+
+function WorkspaceConversation({ runId }: { runId: string }) {
   const [turns, setTurns] = useState<WorkflowRun[]>([]);
   const [threadId, setThreadId] = useState(runId);
   // §28.7: the resource dock — persisted per principal + thread; an
@@ -244,156 +240,83 @@ export default function WorkspaceChatPage() {
     return () => { clearPrincipalLayout(principal); };
   }, [principal]);
   const [error, setError] = useState("");
-  const [showGraph, setShowGraph] = useState(false);
-  const [showTimeline, setShowTimeline] = useState(true);
+  const [showTimeline, setShowTimeline] = useState(() => typeof window !== "undefined" && window.matchMedia("(min-width: 1100px)").matches);
+  const executionTrigger = useRef<HTMLButtonElement>(null);
+  function closeExecution() {
+    setShowTimeline(false);
+    executionTrigger.current?.focus();
+  }
+  useEffect(() => {
+    if (!showTimeline) return;
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { setShowTimeline(false); executionTrigger.current?.focus(); }
+    };
+    document.addEventListener("keydown", dismiss);
+    return () => document.removeEventListener("keydown", dismiss);
+  }, [showTimeline]);
+  const [subscriptionEpoch, setSubscriptionEpoch] = useState(0);
+  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [events, setEvents] = useState<WorkflowEvent[]>([]);
-  const [timelineOpen, setTimelineOpen] = useState(true);
-  const endRef = useRef<HTMLDivElement>(null);
-  // §13.26: the shared event layer's REAL consumer — snapshot-first
-  // reconciliation on mount/reconnect; stale events rejected after
-  // navigation. The reconciled run merges into the thread turns.
-  const { run: reconciledRun } = useRunEvents(runId);
+  const [inspectedRunId, setInspectedRunId] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const followBottom = useRef(true);
+  const alive = useRef(true);
   useEffect(() => {
-    if (!reconciledRun) return;
-    // react-hooks v6 (set-state-in-effect): the merge is a pure list
-    // update deferred off the effect's synchronous window — semantically
-    // identical, without a cascading render inside the effect.
-    queueMicrotask(() => {
-      setTurns((prev) => {
-        const idx = prev.findIndex((t) => t.run_id === reconciledRun.run_id);
-        if (idx === -1) return prev;
-        if (prev[idx] === reconciledRun) return prev;
-        const next = [...prev];
-        next[idx] = reconciledRun;
-        return next;
-      });
-    });
-  }, [reconciledRun]);
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
 
   async function loadThread(anchorId: string) {
+    let workflows: WorkflowRun[];
+    let id: string;
     try {
       const data = await getWorkflowThread(anchorId);
-      if (data.workflows?.length) {
-        setTurns(data.workflows);
-        setThreadId(data.thread_id || anchorId);
-        return;
-      }
-    } catch { /* older backends without /thread */ }
-    const wf = await getWorkflow(anchorId);
-    setTurns([wf]);
-    setThreadId(wf.thread_id || wf.run_id);
+      workflows = data.workflows;
+      id = data.thread_id || anchorId;
+      if (!workflows?.length) throw new Error("Empty thread");
+    } catch {
+      const wf = await getWorkflow(anchorId);
+      workflows = [wf];
+      id = wf.thread_id || wf.run_id;
+    }
+    if (!alive.current) return;
+    // Preserve accepted follow-ups if a lagging thread listing omits them.
+    setTurns(prev => [...workflows, ...prev.filter(w => !workflows.some(f => f.run_id === w.run_id))]);
+    setThreadId(id);
+    setError("");
   }
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        await loadThread(runId);
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load run");
-      }
-    })();
-    return () => { cancelled = true; };
+    void loadThread(runId).catch(e => {
+      if (alive.current) setError(e instanceof Error ? e.message : "Failed to load run");
+    });
+    // This keyed component owns one conversation for its entire lifetime.
   }, [runId]);
 
-  const turnStatusKey = turns.map((t) => `${t.run_id}:${t.status}`).join("|");
-  const turnIdsKey = turns.map((t) => t.run_id).join("|");
-
+  // One shared stream per active turn, plus the latest turn for replayed history.
+  // Snapshots, including the final outputs, come from the shared reconciler.
+  const subscribedIds = [...new Set([...turns.filter((t, i) => !isTerminal(t.status) || i === turns.length - 1)
+    .map(t => t.run_id), inspectedRunId].filter(Boolean))].join("|");
   useEffect(() => {
-    let cancelled = false;
-    let failCount = 0;
-    const tick = async () => {
-      try {
-        const ids = Array.from(new Set([runId, ...turns.map((t) => t.run_id)]));
-        const fresh = await Promise.all(ids.map((id) => getWorkflow(id)));
-        if (cancelled) return;
-        failCount = 0;
-        setError("");
-        setTurns((prev) => {
-          const byId = new Map(fresh.map((w) => [w.run_id, w]));
-          const next = prev.map((w) => byId.get(w.run_id) || w);
-          for (const w of fresh) {
-            if (!next.some((p) => p.run_id === w.run_id)) next.push(w);
-          }
-          return next;
-        });
-      } catch (e) {
-        failCount += 1;
-        if (!cancelled && failCount >= 3) {
-          setError(e instanceof Error ? e.message : "Could not refresh run status");
-        }
-      }
-    };
-    const active =
-      turns.length === 0 ||
-      turns.some((t) => !isTerminal(t.status) || isWaitingHuman(t));
-    if (!active) return;
-    void tick();
-    const id = window.setInterval(() => { void tick(); }, 2500);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-    // Polling is re-bound when a run's status changes. The signature captures the fields
-    // from turns that control polling, while outputs are refreshed by the poll itself.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, turnStatusKey]);
-
-  useEffect(() => {
-    // §18.14 (finding F4): per-turn subscriptions go through the SHARED
-    // reference-counted manager — no overlapping owners.
-    const unsubs = turns.map((turn) => subscribeRun(turn.run_id, ({ event: rawEvent }) => {
-      const event = rawEvent as WorkflowEvent | null;
-      if (!event) return;
-      setEvents((prev) => {
-        if (prev.some((e) => e.event_id && e.event_id === event.event_id)) return prev;
-        return [...prev, event];
+    let active = true;
+    const unsubs = subscribedIds.split("|").filter(Boolean).map(id => subscribeRun(id, ({ event, run }) => {
+      if (!active) return;
+      if (event) setEvents(prev => {
+        if (prev.some(e => e.event_id === event.event_id)) return prev;
+        return [...prev, event].slice(-500);
       });
-      setTurns((prev) => prev.map((wf) => {
-        if (wf.run_id !== turn.run_id) return wf;
-        const updated = { ...wf, tasks: [...wf.tasks] };
-        if (event.type === "WORKFLOW_COMPLETED") updated.status = "COMPLETED";
-        if (event.type === "WORKFLOW_FAILED") updated.status = "FAILED";
-        if (event.type === "WORKFLOW_CANCELLED") updated.status = "CANCELLED";
-        if (event.task_id) {
-          const i = updated.tasks.findIndex((t) => t.task_id === event.task_id);
-          if (i >= 0) {
-            const task = { ...updated.tasks[i] };
-            if (event.type === "TASK_STARTED") task.status = "RUNNING";
-            if (event.type === "TASK_COMPLETED") {
-              task.status = "COMPLETED";
-              if (event.sanitized_metadata?.output) {
-                task.output_data = event.sanitized_metadata.output as Record<string, unknown>;
-              }
-            }
-            if (event.type === "TASK_FAILED") {
-              task.status = "FAILED";
-              task.error = event.summary;
-            }
-            if (event.type === "APPROVAL_REQUIRED") {
-              task.status = "WAITING_APPROVAL";
-              task.output_data = {
-                ...(task.output_data || {}),
-                message: event.summary,
-                ...(event.sanitized_metadata || {}),
-              };
-            }
-            updated.tasks[i] = task;
-          }
-        }
-        return updated;
-      }));
+      if (run) setTurns(prev => prev.map(w => w.run_id === run.run_id ? run : w));
     }));
-    return () => { unsubs.forEach((u) => u()); };
-  // Subscribe again only when the set of run IDs changes.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turnIdsKey]);
+    return () => { active = false; unsubs.forEach(stop => stop()); };
+  }, [subscribedIds, subscriptionEpoch]);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns]);
+    const scroller = scrollRef.current;
+    if (scroller && followBottom.current) scroller.scrollTop = scroller.scrollHeight;
+  }, [turns, pendingMessage]);
 
   const latest = turns[turns.length - 1];
   const waitingHuman = turns.some(isWaitingHuman);
@@ -427,21 +350,14 @@ export default function WorkspaceChatPage() {
   }
 
   return (
-    <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
-    <div className="workspace-chat animate-fade-in-up" style={{ flex: 1, minWidth: 0 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 16, alignItems: "center" }}>
-        <div>
-          <p style={{ margin: 0, fontSize: 12, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: 0.6 }}>Workspace</p>
-          <h1 style={{ margin: "4px 0 0", fontSize: 20, fontWeight: 700 }}>Chat</h1>
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button className="btn btn-secondary btn-sm" onClick={() => setShowGraph((v) => !v)}>
-            {showGraph ? "Hide graph" : "Show graph"}
+    <div className="workspace-shell">
+    <div className="workspace-chat">
+      <div className="workspace-conversation-toolbar">
+        <span className="workspace-conversation-title" title={turns[0]?.goal}>{turns[0]?.goal || "Conversation"}</span>
+        <div className="workspace-conversation-actions">
+          <button ref={executionTrigger} className="btn btn-ghost btn-sm" aria-label="Execution" title="Toggle execution card" aria-expanded={showTimeline} aria-controls="execution-panel" onClick={() => setShowTimeline(value => !value)}>
+            <PanelRight size={18} /><span>Execution</span>
           </button>
-          <button className="btn btn-ghost btn-sm" onClick={() => setShowTimeline((v) => !v)}>
-            {showTimeline ? "Hide timeline" : "Show timeline"}
-          </button>
-          {latest && <Link href={`/dashboard/workflows/${latest.run_id}`} className="btn btn-ghost btn-sm">Details</Link>}
           {waitingHuman && (
             <button className="btn btn-primary btn-sm" onClick={() => void handleResume()} disabled={resuming}>
               {resuming ? "Resuming…" : "Resume after challenge"}
@@ -453,20 +369,14 @@ export default function WorkspaceChatPage() {
             </button>
           )}
           {latestFailed && (
-            <button className="btn btn-secondary btn-sm" onClick={() => retryWorkflow(latest.run_id)}>Retry</button>
+            <button className="btn btn-secondary btn-sm" onClick={() => void retryWorkflow(latest.run_id).then(async () => { await loadThread(runId); setSubscriptionEpoch(v => v + 1); }).catch(e => setError(String(e)))}>Retry</button>
           )}
         </div>
       </div>
 
       {error && <p style={{ color: "var(--error)" }}>{error}</p>}
 
-      {latest && latest.run_id && <RunCommandPanel runId={latest.run_id} />}
-
-      {latest && latest.run_id && <EvaluationPanel runId={latest.run_id} runStatus={latest.status} />}
-      <BudgetUsagePanel refreshMs={60000} />
       {latest?.run_id && <WorkspaceBrowserSessions runId={latest.run_id} />}
-      {latest?.run_id && <RunFeedbackPanel runId={latest.run_id} />}
-
       {waitingHuman && (
         <div className="glass-panel animate-fade-in" style={{ padding: 14, marginBottom: 12, border: "1px solid rgba(245,158,11,0.4)" }}>
           Complete CAPTCHA, OTP, or MFA in the browser window Sandtable opened. It will not fill those fields. Then click Resume.
@@ -474,47 +384,34 @@ export default function WorkspaceChatPage() {
       )}
 
       <div
-        className="chat-thread hide-scrollbar"
-        onScroll={(e) => {
-          // Auto-collapse the timeline so messages get full width while reading.
-          if (e.currentTarget.scrollTop > 60 && timelineOpen) setTimelineOpen(false);
+        ref={scrollRef}
+        className="chat-thread"
+        role="region"
+        aria-label="Conversation"
+        tabIndex={0}
+        onScroll={e => {
+          const el = e.currentTarget;
+          followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          setAwayFromBottom(!followBottom.current);
         }}
       >
         {turns.map((wf) => (
           <div key={wf.run_id} id={`turn-${wf.run_id}`} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <TurnView workflow={wf} />
+            <TurnView workflow={wf} events={events.filter(event => event.run_id === wf.run_id)} onInspect={() => setInspectedRunId(wf.run_id)} />
           </div>
         ))}
-        <div ref={endRef} />
+        {pendingMessage && <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <UserBubble goal={pendingMessage} />
+          <span role="status" className="composer-hint">Sending…</span>
+        </div>}
+        {!turns.length && !error && <p role="status">Loading conversation…</p>}
       </div>
 
-      {showTimeline && events.length > 0 && (
-        <div className="glass-card" style={{ padding: 0, marginBottom: 8, overflow: "hidden" }}>
-          <button
-            type="button"
-            onClick={() => setTimelineOpen((v) => !v)}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "space-between",
-              width: "100%", padding: "10px 14px", background: "none", border: "none",
-              cursor: "pointer", color: "var(--text-secondary)", fontSize: 13, fontWeight: 600,
-            }}
-          >
-            <span>Execution Timeline · {events.length} events</span>
-            <span aria-hidden>{timelineOpen ? "▾" : "▸"}</span>
-          </button>
-          {timelineOpen && (
-            <div style={{ padding: 12, maxHeight: 280, overflow: "auto", borderTop: "1px solid var(--border-primary)" }}>
-              <ExecutionTimeline events={events} />
-            </div>
-          )}
-        </div>
-      )}
-
-      {showGraph && latest && (
-        <div className="glass-card graph-sheet" style={{ padding: 12 }}>
-          <WorkflowGraph workflow={latest} />
-        </div>
-      )}
+      {awayFromBottom && <button className="btn btn-secondary btn-sm chat-jump" onClick={() => {
+        followBottom.current = true;
+        setAwayFromBottom(false);
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }}>Jump to latest</button>}
 
       <div className="workspace-composer-dock">
         {waitingHuman && (
@@ -530,26 +427,31 @@ export default function WorkspaceChatPage() {
           disabled={busy}
           threadId={threadId}
           parentRunId={latest?.run_id || runId}
+          onSubmitting={message => {
+            if (!alive.current) return;
+            if (message) followBottom.current = true;
+            setPendingMessage(message);
+          }}
           onRunCreated={(res) => {
-            void (async () => {
-              // Immediately fetch the new follow-up run and append it
-              try {
-                const newRun = await getWorkflow(res.run_id);
-                setTurns((prev) => {
-                  if (prev.some((t) => t.run_id === res.run_id)) return prev;
-                  return [...prev, newRun];
-                });
-              } catch { /* will appear on next poll */ }
-              // Reload the full thread using threadId (not URL runId)
-              await new Promise((r) => setTimeout(r, 350));
-              await loadThread(threadId);
-            })();
+            if (!alive.current) return;
+            followBottom.current = true;
+            setPendingMessage(null);
+            setTurns(prev => prev.some(t => t.run_id === res.run_id) ? prev : [...prev, {
+              run_id: res.run_id, workflow_id: res.workflow_id, user_id: principal,
+              goal: res.goal, status: res.status, tasks: [], created_at: new Date().toISOString(),
+              thread_id: res.thread_id || threadId,
+            }]);
           }}
         />
       </div>
     </div>
+    <aside id="execution-panel" hidden={!showTimeline} aria-label="Execution details" className="workspace-execution">
+      <WorkspaceExecutionCard turns={turns} events={events} onClose={closeExecution} onInspectRun={setInspectedRunId}>
+        {run => <RunInspection key={run.run_id} run={run} />}
+      </WorkspaceExecutionCard>
+    </aside>
     {dockLayout.tabs.length > 0 && (
-      <aside aria-label="Resource dock" style={{ flexShrink: 0 }}>
+      <aside aria-label="Resource dock" className="workspace-resource-dock">
         <WorkspacePreviewDock
           principal={principal}
           threadId={threadId}
@@ -568,6 +470,22 @@ export default function WorkspaceChatPage() {
 }
 
 
+
+function RunInspection({ run }: { run: WorkflowRun }) {
+  const [showGraph, setShowGraph] = useState(false);
+  const [showUsage, setShowUsage] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
+  return <div className="execution-diagnostics">
+    <RunCommandPanel runId={run.run_id} />
+    <EvaluationPanel runId={run.run_id} runStatus={run.status} />
+    <button className="execution-text-link" aria-expanded={showGraph} onClick={() => setShowGraph(value => !value)}>{showGraph ? "Hide graph" : "Show graph"}</button>
+    {showGraph && <div style={{ height: 260 }}><WorkflowGraph workflow={run} /></div>}
+    <button className="execution-text-link" aria-expanded={showUsage} onClick={() => setShowUsage(value => !value)}>Usage details</button>
+    {showUsage && <BudgetUsagePanel refreshMs={60000} />}
+    <button className="execution-text-link" aria-expanded={showFeedback} onClick={() => setShowFeedback(value => !value)}>Feedback</button>
+    {showFeedback && <RunFeedbackPanel runId={run.run_id} />}
+  </div>;
+}
 
 /**
  * C15 (§5.0 Batch E): the REAL command lifecycle mounted in the workspace —

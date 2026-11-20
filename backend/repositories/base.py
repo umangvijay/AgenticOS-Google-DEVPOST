@@ -212,7 +212,7 @@ class BaseMCPRepository(ABC):
         ...
 
     @abstractmethod
-    async def cache_tools(self, mcp_id: str, tools: List[Dict[str, Any]]) -> None:
+    async def cache_tools(self, mcp_id: str, tools: List[Dict[str, Any]], *, replace_all: bool = True) -> None:
         """Cache discovered tool definitions for an MCP."""
         ...
 

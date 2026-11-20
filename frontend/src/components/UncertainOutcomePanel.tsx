@@ -45,7 +45,7 @@ const STATE_COPY: Record<string, { title: string; body: string; tone: string }> 
   },
   OUTCOME_UNKNOWN: {
     title: "Outcome unknown",
-    body: "The connection ended before AgentOS could confirm the result. The action may have been submitted. Automatic resend is paused while the outcome is checked.",
+    body: "The connection ended before Sandtable could confirm the result. The action may have been submitted. Automatic resend is paused while the outcome is checked.",
     tone: "var(--warning, #eab308)",
   },
   PARTIALLY_APPLIED: {

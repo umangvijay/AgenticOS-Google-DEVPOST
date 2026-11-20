@@ -146,11 +146,15 @@ def _is_gemini_35_or_newer(model: str) -> bool:
 
 def allowed_models() -> list[str]:
     from backend.services.llm_context import active_llm_provider
+    if active_llm_provider() == "groq":
+        return [settings.GROQ_MODEL]
     if active_llm_provider() == "azure":
         return [settings.AZURE_OPENAI_DEPLOYMENT]
     if active_llm_provider() == "huggingface":
         return [settings.HF_MODEL]
-    return list(dict.fromkeys(m.strip() for m in settings.GEMINI_ALLOWED_MODELS.split(",") if m.strip()))
+    from backend.services.gemini_catalog import workflow_eligible
+    return list(dict.fromkeys(m.strip() for m in settings.GEMINI_ALLOWED_MODELS.split(",")
+                              if workflow_eligible(m.strip())))
 
 
 def _candidate_models(preferred: Optional[str] = None) -> list:

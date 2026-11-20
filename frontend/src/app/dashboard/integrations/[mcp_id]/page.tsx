@@ -12,6 +12,8 @@ export default function IntegrationDetailPage() {
   const [mcp, setMcp] = useState<Awaited<ReturnType<typeof getIntegration>> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [toggling, setToggling] = useState(false);
   const [testStatus, setTestStatus] = useState("");
   const [testing, setTesting] = useState(false);
   const [apiKey, setApiKey] = useState("");
@@ -24,6 +26,7 @@ export default function IntegrationDetailPage() {
     try {
       const data = await getIntegration(mcpId);
       setMcp(data);
+      setError("");
       try {
         const history = await listConnectorRevisions(mcpId);
         setRevisions(history.revisions);
@@ -46,6 +49,8 @@ export default function IntegrationDetailPage() {
 
   const handleToggle = async () => {
     if (!mcp) return;
+    setToggling(true);
+    setActionError("");
     try {
       if (mcp.is_enabled) {
         await disableIntegration(mcpId);
@@ -54,18 +59,22 @@ export default function IntegrationDetailPage() {
       }
       await load();
     } catch (err) {
-      alert("Failed to toggle state: " + (err instanceof Error ? err.message : String(err)));
+      setActionError("Could not change integration state: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setToggling(false);
     }
   };
 
   const handleTest = async () => {
     setTesting(true);
+    setTestStatus("");
+    setActionError("");
     try {
       const result = await testIntegration(mcpId);
-      setTestStatus(result.status === "untested" ? "No safe probe was available. This integration has not been verified." : `Live test: ${result.status}`);
+      setTestStatus(result.status === "browser_ready" ? "The public start page opened successfully. Other proposed actions need separate validation." : result.status === "untested" ? "No safe probe was available. This integration has not been verified." : `Live test: ${result.status}`);
       await load();
     } catch (err) {
-      alert("Test failed: " + (err instanceof Error ? err.message : String(err)));
+      setActionError("Test failed: " + (err instanceof Error ? err.message : String(err)));
     } finally {
       setTesting(false);
     }
@@ -77,7 +86,7 @@ export default function IntegrationDetailPage() {
       await deleteIntegration(mcpId);
       router.push("/dashboard/integrations");
     } catch (err) {
-      alert("Delete failed: " + (err instanceof Error ? err.message : String(err)));
+      setActionError("Delete failed: " + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -87,9 +96,10 @@ export default function IntegrationDetailPage() {
     </div>
   );
 
-  if (error || !mcp) return (
-    <div className="empty-state">
+  if (!mcp) return (
+    <div className="empty-state" role="alert">
       <div style={{ color: "var(--error)", marginBottom: 16 }}>{error || "Integration not found"}</div>
+      <button className="btn btn-primary" onClick={() => { setLoading(true); void load(); }}>Try again</button>
       <button className="btn btn-secondary" onClick={() => router.push("/dashboard/integrations")}>Back</button>
     </div>
   );
@@ -97,8 +107,9 @@ export default function IntegrationDetailPage() {
   return (
     <div className="animate-fade-in" data-scroll-reveal style={{ maxWidth: 900, margin: "0 auto" }}>
       
+      {(actionError || error) && <p className="load-error" role="alert">{actionError || error}</p>}
       {/* Header */}
-      <div className="glass-card" style={{ padding: 32, marginBottom: 24, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+      <div className="glass-card" style={{ padding: 24, marginBottom: 24, display: "flex", flexWrap: "wrap", gap: 20, justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
             <h1 style={{ fontSize: 24, fontWeight: 700, margin: 0 }}>{mcp.name}</h1>
@@ -106,7 +117,7 @@ export default function IntegrationDetailPage() {
               mcp.circuit_breaker?.state === "OPEN" ? "badge-error" : 
               !mcp.is_enabled ? "badge-neutral" : "badge-success"
             }`}>
-              {mcp.circuit_breaker?.state === "OPEN" ? "Outage" : mcp.is_enabled ? "Active" : "Disabled"}
+              {mcp.circuit_breaker?.state === "OPEN" ? "Outage" : mcp.is_enabled ? "Enabled" : "Disabled"}
             </span>
           </div>
           <p style={{ color: "var(--text-secondary)", fontSize: 15 }}>{mcp.description || "No description provided."}</p>
@@ -117,13 +128,19 @@ export default function IntegrationDetailPage() {
           <button className="btn btn-secondary" onClick={handleTest} disabled={testing}>
             {testing ? <span className="spinner" style={{ width: 14, height: 14 }}/> : "Run Test"}
           </button>
-          <button className={mcp.is_enabled ? "btn btn-secondary" : "btn btn-primary"} onClick={handleToggle}>
-            {mcp.is_enabled ? "Disable" : "Enable"}
+          <button className={mcp.is_enabled ? "btn btn-secondary" : "btn btn-primary"} onClick={handleToggle} disabled={toggling}>
+            {toggling ? "Updating…" : mcp.is_enabled ? "Disable" : "Enable"}
           </button>
         </div>
       </div>
 
       {testStatus && <p role="status">{testStatus}</p>}
+      {mcp.operation_eligibility?.some(op => !op.allowed) && (
+        <div className="glass-card" style={{ padding: 20, marginBottom: 24 }} role="note">
+          <strong>Some tools aren’t ready to use</strong>
+          <p style={{ marginTop: 8, color: "var(--text-secondary)" }}>Enabling an integration does not verify its tools. Review each reason below and use Run Test to check available safe operations. Tools with an unknown definition origin need a validated definition before use.</p>
+        </div>
+      )}
       <section className="glass-card" style={{ padding: 24, marginBottom: 24 }} aria-label="Connector version history">
         <h2 style={{ fontSize: 18, marginBottom: 8 }}>Version history</h2>
         <p style={{ color: "var(--text-secondary)", marginBottom: 16 }}>Save a definition before making changes. Restore creates a disabled copy; reconnect credentials and test it before use.</p>
@@ -149,9 +166,9 @@ export default function IntegrationDetailPage() {
           }}>Restore as disabled copy</button>
         </div>)}
       </section>
-      <div style={{ display: "flex", gap: 24 }}>
+      <div className="integration-detail-columns">
         {/* Main Content */}
-        <div style={{ flex: 2, display: "flex", flexDirection: "column", gap: 24 }}>
+        <div style={{ flex: 2, minWidth: 0, display: "flex", flexDirection: "column", gap: 24 }}>
           <div className="glass-card" style={{ padding: 24 }}>
             {/* Phase 6 §6.17: operation-level truth — eligibility per
                 operation from the ONE authoritative evaluator, provenance
@@ -166,7 +183,7 @@ export default function IntegrationDetailPage() {
                     {summary.eligible} eligible · {summary.blocked} blocked · {summary.total} total
                   </div>;
                 })()}
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                   <thead>
                     <tr style={{ textAlign: "left", color: "var(--text-tertiary)" }}>
                       <th style={{ padding: "6px 8px" }}>Operation</th>
@@ -189,7 +206,7 @@ export default function IntegrationDetailPage() {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </table></div>
               </div>
             ) : null}
             <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 20 }}>Available Tools ({mcp.tools?.length || 0})</h2>

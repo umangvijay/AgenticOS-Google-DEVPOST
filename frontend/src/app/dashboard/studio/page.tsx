@@ -21,15 +21,15 @@ export default function StudioPage() {
   const [modelSegments, setModelSegments] = useState(16);
   const [modelResult, setModelResult] = useState<{ artifact_id: string; files: string[]; name: string; model?: { vertices: number; faces: number; sha256: string } } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{ action: string; message: string } | null>(null);
 
   async function run<T>(key: string, fn: () => Promise<T>, setter: (v: T) => void) {
-    setError("");
+    setError(null);
     setBusy(key);
     try {
       setter(await fn());
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Request failed");
+      setError({ action: key, message: e instanceof Error ? e.message : "Request failed" });
     } finally {
       setBusy(null);
     }
@@ -41,14 +41,14 @@ export default function StudioPage() {
       <p style={{ color: "var(--text-secondary)", marginBottom: 24 }}>
         Site health, debugging, and generating a website or app — live calls, not canned output.
       </p>
-      {error && <div className="glass-card" style={{ padding: 12, marginBottom: 16, color: "var(--error)" }}>{error}</div>}
+      {error && error.action !== "g" && <div role="alert" className="glass-card" style={{ padding: 12, marginBottom: 16, color: "var(--error)" }}>{error.message}</div>}
 
       <div style={{ display: "grid", gap: 20 }}>
         <section className="glass-card" style={{ padding: 20 }}>
           <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>Website health</h2>
           <form onSubmit={(e: FormEvent) => { e.preventDefault(); run("h", () => checkSiteHealth(healthUrl), setHealth); }} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <input className="input" style={{ flex: 1, minWidth: 200 }} value={healthUrl} onChange={(e) => setHealthUrl(e.target.value)} />
-            <button className="btn btn-primary" disabled={busy === "h"}>{busy === "h" ? "Checking…" : "Check"}</button>
+            <button className="btn btn-primary" disabled={busy !== null}>{busy === "h" ? "Checking…" : "Check"}</button>
           </form>
           {health && <div style={{marginTop: 16}}>
             <strong>{String(health.title || health.host || health.url || "Health report")}</strong>
@@ -66,7 +66,7 @@ export default function StudioPage() {
         <section className="glass-card" style={{ padding: 20 }}>
           <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>Debug code</h2>
           <textarea className="input" rows={8} value={src} onChange={(e) => setSrc(e.target.value)} style={{ fontFamily: "var(--font-mono)", fontSize: 13 }} />
-          <button className="btn btn-secondary" style={{ marginTop: 10 }} disabled={busy === "d"} onClick={() => run("d", () => debugSource(src), setDebug)}>
+          <button className="btn btn-secondary" style={{ marginTop: 10 }} disabled={busy !== null} onClick={() => run("d", () => debugSource(src), setDebug)}>
             {busy === "d" ? "Analyzing…" : "Diagnose"}
           </button>
           {debug && (
@@ -92,7 +92,7 @@ export default function StudioPage() {
             <label style={{ fontSize: 13 }}>Segments
               <input className="input" type="number" min={3} max={128} value={modelSegments} onChange={(e) => setModelSegments(Number(e.target.value) || 16)} style={{ width: 80, marginLeft: 6 }} />
             </label>
-            <button className="btn btn-primary" disabled={busy === "m"} onClick={() => run("m", async () => {
+            <button className="btn btn-primary" disabled={busy !== null} onClick={() => run("m", async () => {
               const size = modelSize.split(",").map((v) => parseFloat(v.trim())).filter((v) => Number.isFinite(v));
               return generateModelAsset({
                 kind: modelKind,
@@ -138,8 +138,9 @@ export default function StudioPage() {
               <option value="standard">Standard (medium)</option>
               <option value="full">Full (large)</option>
             </select>
-            <button className="btn btn-primary" disabled={!brief.trim() || busy === "g"} onClick={() => run("g", async () => {
+            <button className="btn btn-primary" disabled={!brief.trim() || busy !== null} onClick={() => run("g", async () => {
               setProgress(null);
+              setArtifact(null);
               const result = await generateProject(brief, kind, "", scale, setProgress);
               const files = result.files || [];
               const entry = files.find((f) => f === "index.html") || files.find((f) => f.endsWith(".html")) || files[0];
@@ -166,8 +167,9 @@ export default function StudioPage() {
               {busy === "g" ? "Generating…" : "Generate"}
             </button>
           </div>
-          {progress && <div role="status" style={{marginTop: 12, fontSize: 13}}>
-            {progress.stage?.replaceAll("_", " ") || progress.status}
+          {error?.action === "g" && <p role="alert" style={{ color: "var(--error)" }}>{error.message}</p>}
+          {progress && (!error || progress.status === "failed") && <div role="status" style={{marginTop: 12, fontSize: 13}}>
+            {progress.status === "failed" ? "Generation failed" : progress.status === "completed" ? "Generation completed" : progress.stage?.replaceAll("_", " ") || progress.status}
             {Boolean(progress.total_files) && ` · ${progress.completed_files || 0} / ${progress.total_files} files`}
           </div>}
           {artifact && (

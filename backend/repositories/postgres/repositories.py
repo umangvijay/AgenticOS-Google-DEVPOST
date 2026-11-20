@@ -556,7 +556,7 @@ class PostgresMCPRepository(PostgresConnectorContract, _Base):
             user_id)
         return [self._shape(r) for r in rows]
 
-    async def update_mcp_health(self, mcp_id: str, status: str) -> None:
+    async def update_mcp_health(self, mcp_id: str, status: str, timestamp: Optional[datetime] = None) -> None:
         await self.db.execute(
             "UPDATE pg_mcps SET health_status=$2, updated_at=now() "
             "WHERE id=$1", mcp_id, status)
@@ -601,7 +601,7 @@ class PostgresMCPRepository(PostgresConnectorContract, _Base):
         await self.db.execute("DELETE FROM mcp_tools WHERE mcp_id=$1", mcp_id)
         await self.db.execute("DELETE FROM pg_mcps WHERE id=$1", mcp_id)
 
-    async def cache_tools(self, mcp_id: str, tools: List[Dict[str, Any]]) -> None:
+    async def cache_tools(self, mcp_id: str, tools: List[Dict[str, Any]], *, replace_all: bool = True) -> None:
         """Replace the tool cache for one registry (sqlite parity)."""
         import datetime as _dt
         now = datetime.now(timezone.utc).isoformat()
@@ -609,8 +609,11 @@ class PostgresMCPRepository(PostgresConnectorContract, _Base):
                    + _dt.timedelta(hours=24)).isoformat()
         async with self.db.pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute("DELETE FROM mcp_tools WHERE mcp_id=$1",
-                                   mcp_id)
+                if replace_all:
+                    await conn.execute("DELETE FROM mcp_tools WHERE mcp_id=$1", mcp_id)
+                else:
+                    await conn.execute("DELETE FROM mcp_tools WHERE mcp_id=$1 AND tool_name=ANY($2::text[])",
+                                       mcp_id, [tool["tool_name"] for tool in tools])
                 for t in tools:
                     op = t.get("operation") or {}
                     await conn.execute(

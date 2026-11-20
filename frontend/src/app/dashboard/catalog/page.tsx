@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { listCatalog, installFromCatalog, CatalogEntry } from "@/lib/api";
 
@@ -7,6 +8,8 @@ export default function CatalogPage() {
   const [entries, setEntries] = useState<CatalogEntry[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [info, setInfo] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -14,10 +17,10 @@ export default function CatalogPage() {
   useEffect(() => {
     let active = true;
     listCatalog().then(res => { if (active) setEntries(res.integrations || []); })
-      .catch(err => { if (active) setError(err instanceof Error ? err.message : "Failed to load the catalog"); })
+      .catch(err => { if (active) setLoadError(err instanceof Error ? err.message : "Please try again in a moment."); })
       .finally(() => { if (active) setIsLoading(false); });
     return () => { active = false; };
-  }, []);
+  }, [loadAttempt]);
 
   const handleInstall = async (entry: CatalogEntry) => {
     setBusyId(entry.mcp_id);
@@ -46,6 +49,13 @@ export default function CatalogPage() {
         </p>
       </div>
 
+      {loadError && (
+        <div className="glass-card load-error" role="alert">
+          <h2>Couldn’t load the catalog</h2>
+          <p>{loadError}</p>
+          <button className="btn btn-secondary" onClick={() => { setLoadError(""); setIsLoading(true); setLoadAttempt(n => n + 1); }}>Try again</button>
+        </div>
+      )}
       {error && (
         <div style={{ padding: "12px 16px", background: "var(--error-subtle)", color: "var(--error)", borderRadius: "var(--radius-md)", marginBottom: 20 }}>
           {error}
@@ -62,12 +72,13 @@ export default function CatalogPage() {
           <div className="skeleton" style={{ height: 90 }} />
           <div className="skeleton" style={{ height: 90 }} />
         </div>
-      ) : entries.length === 0 ? (
+      ) : loadError ? null : entries.length === 0 ? (
         <div className="glass-card" style={{ padding: 32, textAlign: "center" }}>
           <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>The catalog is empty</h3>
           <p style={{ color: "var(--text-secondary)", fontSize: 14 }}>
             Build an integration from an OpenAPI URL — once its live probe passes you can publish it here.
           </p>
+          <Link className="btn btn-secondary" href="/dashboard/integrations/create" style={{ marginTop: 16 }}>Build an integration</Link>
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>

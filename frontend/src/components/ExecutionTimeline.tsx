@@ -1,72 +1,80 @@
 "use client";
 
-import { WorkflowEvent } from "@/lib/api";
-import { format, isValid } from "date-fns";
-import { CheckCircle2, PlayCircle, AlertCircle, RefreshCw, XCircle, ShieldAlert } from "lucide-react";
+import type { Task, WorkflowEvent } from "@/lib/api";
+import { Check, ChevronRight, Circle, LoaderCircle, ShieldAlert, SquareTerminal, X } from "lucide-react";
 
-export default function ExecutionTimeline({ events }: { events: WorkflowEvent[] }) {
-  const latestFrame = [...events].reverse().map((event) => event.sanitized_metadata?.browser_frame)
-    .find((value): value is { image: string; url: string; step: number } => {
-      if (!value || typeof value !== "object") return false;
-      const frame = value as Record<string, unknown>;
-      return typeof frame.image === "string" && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(frame.image)
-        && typeof frame.url === "string" && typeof frame.step === "number";
-    });
-  const getIcon = (type: string) => {
-    switch (type) {
-      case "WORKFLOW_STARTED":
-      case "TASK_STARTED":
-      case "TOOL_INVOKED":
-        return <PlayCircle className="w-5 h-5 text-blue-400" />;
-      case "WORKFLOW_COMPLETED":
-      case "TASK_COMPLETED":
-      case "TOOL_COMPLETED":
-        return <CheckCircle2 className="w-5 h-5 text-green-400" />;
-      case "WORKFLOW_FAILED":
-      case "TASK_FAILED":
-        return <XCircle className="w-5 h-5 text-destructive" />;
-      case "APPROVAL_REQUIRED":
-        return <ShieldAlert className="w-5 h-5 text-amber-500" />;
-      case "TASK_RECOVERING":
-      case "TASK_RETRYING":
-        return <RefreshCw className="w-5 h-5 text-purple-400" />;
-      default:
-        return <AlertCircle className="w-5 h-5 text-muted-foreground" />;
-    }
-  };
+export function executionLabel(status?: string) {
+  const labels: Record<string, string> = { COMPLETED: "Completed", RUNNING: "Working", PENDING: "Queued",
+    WAITING: "Waiting", WAITING_APPROVAL: "Needs your input", FAILED: "Failed", CANCELLED: "Stopped",
+    RETRYING: "Retrying", RECOVERING: "Recovering", NEEDS_REVIEW: "Needs review", EXPIRED: "Expired", BLOCKED: "Blocked", SKIPPED: "Skipped" };
+  return labels[status || ""] || "Waiting";
+}
 
-  return (
-    <div className="bg-card border border-border rounded-xl p-4 h-full flex flex-col">
-      <h3 className="font-semibold text-lg mb-4">Execution Timeline</h3>
-      {latestFrame && (
-        <figure className="mb-4 overflow-hidden rounded-lg border border-border">
-          {/* Browser frames are authenticated event data, not remote image URLs. */}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={latestFrame.image} alt={`Browser page at step ${latestFrame.step}`} className="w-full" />
-          <figcaption className="p-2 text-xs text-muted-foreground break-all">
-            Browser · Step {latestFrame.step} · {latestFrame.url}
-            <span className="block">Latest captured view. Form fields are hidden.</span>
-          </figcaption>
-        </figure>
-      )}
-      <div className="flex-1 overflow-y-auto pr-2 space-y-4">
-        {events.length === 0 ? (
-          <p className="text-sm text-muted-foreground italic">No events yet.</p>
-        ) : (
-          events.map((event, idx) => (
-            <div key={event.event_id || idx} className="flex space-x-3 items-start animate-in slide-in-from-left-2 duration-300">
-              <div className="mt-0.5">{getIcon(event.type)}</div>
-              <div className="flex-1 space-y-1">
-                <p className="text-sm font-medium leading-none text-foreground">{event.summary}</p>
-                <div className="flex items-center text-xs text-muted-foreground space-x-2">
-                  <span>{event.timestamp && isValid(new Date(event.timestamp)) ? format(new Date(event.timestamp), "HH:mm:ss") : ""}</span>
-                  {event.task_id && <span className="px-1.5 py-0.5 bg-muted rounded font-mono text-[10px]">{event.task_id}</span>}
-                </div>
-              </div>
-            </div>
-          ))
-        )}
+function StateIcon({ status }: { status?: string }) {
+  if (status === "COMPLETED") return <Check size={15} className="execution-success" />;
+  if (["RUNNING", "RETRYING", "RECOVERING"].includes(status || "")) return <LoaderCircle size={15} className="execution-working" />;
+  if (status === "FAILED") return <X size={15} className="execution-failed" />;
+  if (["NEEDS_REVIEW", "WAITING_APPROVAL", "BLOCKED"].includes(status || "")) return <ShieldAlert size={15} />;
+  return <Circle size={13} />;
+}
+
+function EventRows({ events }: { events: WorkflowEvent[] }) {
+  return <ol className="execution-events">
+    {events.map((event, index) => <li key={event.event_id || `${event.type}-${index}`}>
+      <SquareTerminal size={14} aria-hidden />
+      <div><span>{event.summary || event.type.replaceAll("_", " ").toLowerCase()}</span>
+        {event.timestamp && !Number.isNaN(Date.parse(event.timestamp)) &&
+          <time dateTime={event.timestamp}>{new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>}
       </div>
-    </div>
-  );
+    </li>)}
+  </ol>;
+}
+
+/** Saved task states and event history stay separate: a notification is not an output. */
+export default function ExecutionTimeline({ events, tasks = [], compact = false }: {
+  events: WorkflowEvent[]; tasks?: Task[]; compact?: boolean;
+}) {
+  const groups = new Map<string, { task?: Task; events: WorkflowEvent[] }>();
+  for (const task of tasks) groups.set(`${task.run_id}:${task.task_id}`, { task, events: [] });
+  const runEvents: WorkflowEvent[] = [];
+  for (const event of events) {
+    if (!event.task_id) { runEvents.push(event); continue; }
+    const key = `${event.run_id}:${event.task_id}`;
+    if (!groups.has(key)) groups.set(key, { events: [] });
+    groups.get(key)!.events.push(event);
+  }
+  const latestFrame = [...events].reverse().map(e => e.sanitized_metadata?.browser_frame).find(value => {
+    if (!value || typeof value !== "object") return false;
+    const frame = value as Record<string, unknown>;
+    return typeof frame.image === "string" && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(frame.image)
+      && typeof frame.url === "string" && typeof frame.step === "number";
+  }) as { image: string; url: string; step: number } | undefined;
+
+  return <div className={`execution-timeline ${compact ? "execution-timeline-compact" : "execution-timeline-full"}`}>
+    {!compact && <h3>Execution timeline</h3>}
+    {groups.size === 0 && runEvents.length === 0 && <p className="execution-empty">Activity will appear when the run starts.</p>}
+    {[...groups].map(([key, group], index) => <details className="execution-step" key={key}>
+      <summary>
+        <StateIcon status={group.task?.status || group.events.at(-1)?.status} />
+        <span className="execution-step-title">{group.task?.title || (group.task?.agent === "core.chat" ? "Respond to your message" : group.task?.tool || `Step ${index + 1}`)}</span>
+        {group.task && <span className="execution-step-state">{executionLabel(group.task.status)}</span>}
+        <ChevronRight size={14} className="disclosure-chevron" />
+      </summary>
+      {group.events.length > 0 ? <EventRows events={group.events} /> : <p className="execution-empty">Saved state: {executionLabel(group.task?.status)}. No event history loaded for this step.</p>}
+      {group.task?.error && <p className="execution-step-error">{group.task.error}</p>}
+    </details>)}
+    {runEvents.length > 0 && <details className="execution-step">
+      <summary><SquareTerminal size={15} /><span className="execution-step-title">Run activity</span><span className="execution-count">{runEvents.length}</span><ChevronRight size={14} className="disclosure-chevron" /></summary>
+      <EventRows events={runEvents} />
+    </details>}
+    {latestFrame && <details className="execution-step">
+      <summary><SquareTerminal size={15} /><span className="execution-step-title">Browser preview</span><ChevronRight size={14} className="disclosure-chevron" /></summary>
+      <figure className="execution-browser-frame">
+        {/* Authenticated frame from the event stream, never a remote image. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={latestFrame.image} alt={`Browser at step ${latestFrame.step}`} />
+        <figcaption>Step {latestFrame.step} · {latestFrame.url}</figcaption>
+      </figure>
+    </details>}
+  </div>;
 }

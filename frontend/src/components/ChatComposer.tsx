@@ -29,7 +29,6 @@ const MAX_ATTACH = 5;
 const MAX_BYTES = 4 * 1024 * 1024;
 const MAX_TEXT = 12000;
 
-type Attached = GoalAttachment & { id: string; kind: "file" | "photo" };
 
 function isTextFile(file: File) {
   if (TEXT_TYPES.some((t) => file.type.startsWith(t) || file.type === t)) return true;
@@ -37,11 +36,11 @@ function isTextFile(file: File) {
   return TEXT_EXTS.some((ext) => name.endsWith(ext));
 }
 
-async function fileToAttachment(file: File, kind: "file" | "photo"): Promise<Attached> {
+async function fileToAttachment(file: File, kind: "file" | "photo"): Promise<GoalAttachment> {
   if (file.size > MAX_BYTES) {
     throw new Error(`${file.name} is larger than 4 MB.`);
   }
-  const base = { id: `${file.name}-${file.size}-${Date.now()}`, name: file.name, mime: file.type || "application/octet-stream", kind };
+  const base = { name: file.name, mime: file.type || "application/octet-stream" };
   if (kind === "photo" || file.type.startsWith("image/")) {
     const image_base64 = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -53,7 +52,7 @@ async function fileToAttachment(file: File, kind: "file" | "photo"): Promise<Att
       reader.onerror = () => reject(reader.error || new Error("Could not read photo"));
       reader.readAsDataURL(file);
     });
-    return { ...base, kind: "photo", mime: file.type || "image/jpeg", image_base64 };
+    return { ...base, mime: file.type || "image/jpeg", image_base64 };
   }
   if (isTextFile(file)) {
     const text = (await file.text()).slice(0, MAX_TEXT);
@@ -92,16 +91,9 @@ export default function ChatComposer({
     }).catch(() => {});
     return () => { active = false; };
   }, []);
-  // §19 (C9): the submission identity is declared BEFORE the draft so
-  // the hook persists it with the draft record.
-  const [submissionKey, setSubmissionKey] = useState(() => newSubmissionKey());
-  // §18.3: the draft survives refresh/auth expiry (sessionStorage keyed
-  // per thread when one exists).
-  const { draft, setDraft, clearDraft, restoredSubmissionIdentity, storageError } = useDraft(
-    threadId ?? null, "workspace", submissionKey);
-  const goal = draft;
+  const { draft: goal, setDraft, clearDraft, submissionIdentity, attachments, storageError } =
+    useDraft(threadId, "workspace");
   const setGoal = setDraft;
-  const effectiveSubmissionKey = restoredSubmissionIdentity || submissionKey;
   const [ambiguousAcceptance, setAmbiguousAcceptance] = useState<{
     key: string; message: string;
   } | null>(null);
@@ -110,7 +102,7 @@ export default function ChatComposer({
   const [budgetError, setBudgetError] = useState<BudgetErrorBody | null>(null);
   const [admissionError, setAdmissionError] = useState<AdmissionErrorBody | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [attachments, setAttachments] = useState<Attached[]>([]);
+  const [files, setFiles] = useState(new Map<string, { file: File; kind: "file" | "photo" }>());
   const menuRef = useRef<HTMLDivElement>(null);
   const photoRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -131,22 +123,30 @@ export default function ChatComposer({
     return () => document.removeEventListener("mousedown", onDoc);
   }, []);
 
-  async function addFiles(list: FileList | null, kind: "file" | "photo") {
+  function addFiles(list: FileList | null, kind: "file" | "photo") {
     if (!list?.length) return;
     setError("");
     const next = [...attachments];
+    const selected = new Map(attachments.flatMap(ref => {
+      const entry = files.get(ref.id);
+      return entry ? [[ref.id, entry] as const] : [];
+    }));
     for (const file of Array.from(list)) {
-      if (next.length >= MAX_ATTACH) {
+      if (file.size > MAX_BYTES) {
+        setError(`${file.name} is larger than 4 MB.`);
+        continue;
+      }
+      const missing = next.find(ref => ref.name === file.name && !selected.has(ref.id));
+      if (!missing && next.length >= MAX_ATTACH) {
         setError(`You can attach up to ${MAX_ATTACH} items.`);
         break;
       }
-      try {
-        next.push(await fileToAttachment(file, kind));
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : "Could not read that file");
-      }
+      const ref = missing ?? { id: newSubmissionKey(), name: file.name };
+      selected.set(ref.id, { file, kind });
+      if (!missing) next.push(ref);
     }
-    setAttachments(next);
+    setFiles(selected);
+    setDraft(goal, next);
     setMenuOpen(false);
     if (photoRef.current) photoRef.current.value = "";
     if (fileRef.current) fileRef.current.value = "";
@@ -155,6 +155,10 @@ export default function ChatComposer({
   async function send(text?: string) {
     const value = (text ?? goal).trim();
     if (loading || disabled) return;
+    if (attachments.some(ref => !files.has(ref.id))) {
+      setError("Reselect or remove the missing files before sending.");
+      return;
+    }
     if (!value && attachments.length === 0) {
       setError("Type a message or attach a file.");
       return;
@@ -169,26 +173,23 @@ export default function ChatComposer({
     const prompt = value || "Use the attached files and photos to complete the request.";
     onSubmitting?.(prompt);
     try {
-      const payload = attachments.map(({ name, mime, text: body, image_base64 }) => ({
-        name, mime, text: body, image_base64,
+      setDraft(prompt);
+      const payload = await Promise.all(attachments.map(async ref => {
+        const { file, kind } = files.get(ref.id)!;
+        const { name, mime, text, image_base64 } = await fileToAttachment(file, kind);
+        return { name, mime, text, image_base64 };
       }));
-      // §19 (C9): persist the submission identity + model + attachment
-      // references BEFORE dispatch — a refresh right after an accepted-
-      // but-unacknowledged submission recovers the SAME intent.
-      setDraft(prompt);   // persists submission_identity via the hook contract
       const res = await submitGoal(prompt, payload, {
         model: model || catalog?.default_model || undefined,
         parent_run_id: parentRunId,
         thread_id: threadId,
-        idempotency_key: effectiveSubmissionKey,
+        idempotency_key: submissionIdentity,
       });
-      setGoal("");
       clearDraft();   // Accepted messages no longer need a saved draft.
-      setAttachments([]);
+      setFiles(new Map());
       setBudgetError(null);
       setAdmissionError(null);
       setError("");
-      setSubmissionKey(newSubmissionKey());   // success: next submission is a NEW intent
       if (onRunCreated) {
         onRunCreated({ ...res, goal: prompt });
         setLoading(false);
@@ -215,7 +216,7 @@ export default function ChatComposer({
         const ambiguous = /timed out|timeout/i.test(message);
         if (ambiguous) {
           setAmbiguousAcceptance({
-            key: effectiveSubmissionKey,
+            key: submissionIdentity,
             message: ("Your submission may have been accepted — its "
                       + "status is unknown because the response timed "
                       + "out. Retrying reuses the same request identity, "
@@ -276,8 +277,8 @@ export default function ChatComposer({
         <div className="attach-chip-row">
           {attachments.map((a) => (
             <span key={a.id} className="attach-chip">
-              {a.kind === "photo" ? "Photo" : "File"} · {a.name}
-              <button type="button" aria-label={`Remove ${a.name}`} onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}>
+              {a.name}{!files.has(a.id) && " · Reselect file"}
+              <button type="button" aria-label={`Remove ${a.name}`} disabled={loading} onClick={() => setDraft(goal, attachments.filter(x => x.id !== a.id))}>
                 ×
               </button>
             </span>

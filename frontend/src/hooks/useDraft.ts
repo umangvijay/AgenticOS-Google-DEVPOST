@@ -4,6 +4,8 @@ import { useCallback, useState, useSyncExternalStore } from "react";
 import {
   clearDraft as clearStoredDraft, loadDraft, saveDraft, getAuthUserId,
 } from "@/lib/draft-store";
+import { newSubmissionKey } from "@/lib/api";
+import type { DraftRecord } from "@/lib/draft-store";
 import { AUTH_CHANGED } from "@/lib/auth-session";
 
 function subscribeIdentity(onChange: () => void) {
@@ -28,14 +30,14 @@ const serverIdentity = () => null;
  * "new" until a thread exists.
  */
 export function useDraft(threadId: string | null | undefined,
-                         surface = "workspace",
-                         submissionIdentity: string | null = null) {
+                         surface = "workspace") {
   const key = threadId ?? null;
   const [draft, setDraftState] = useState("");
   const [restored, setRestored] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
   const identity = useSyncExternalStore(subscribeIdentity, getAuthUserId, serverIdentity);
-  const [restoredSubmissionIdentity, setRestoredSubmissionIdentity] = useState<string | null>(null);
+  const [submissionIdentity, setSubmissionIdentity] = useState(newSubmissionKey);
+  const [attachments, setAttachments] = useState<DraftRecord["attachment_references"]>([]);
   const [restoreStamp, setRestoreStamp] = useState<{ identity: string | null; key: string | null; surface: string } | null>(null);
   // Restore on the first mount as well as on thread/account changes. The
   // external store supplies the server snapshot during hydration.
@@ -44,31 +46,36 @@ export function useDraft(threadId: string | null | undefined,
     setRestoreStamp({ identity, key, surface });
     const stored = identity ? loadDraft(surface, key) : null;
     setDraftState(stored?.text ?? "");
-    setRestoredSubmissionIdentity(stored?.text ? stored.submission_identity : null);
+    setSubmissionIdentity(stored?.submission_identity || newSubmissionKey());
+    setAttachments(stored?.attachment_references ?? []);
     setRestored(true);
     setStorageError(null);
   }
 
-  const setDraft = useCallback((value: string) => {
+  const setDraft = useCallback((value: string, references = attachments) => {
+    if (getAuthUserId() !== identity) return;
+    setAttachments(references);
     setDraftState(value);
     if (!restored) return;   // never persist before restoration
     const out = saveDraft(surface, key, {
       text: value,
       selected_model: null,
-      attachment_references: [],
+      attachment_references: references,
       // §19 (C9): the PENDING submission identity persists with the
       // draft — refresh after an accepted-but-unacknowledged submission
       // can recover the same intent.
-      submission_identity: restoredSubmissionIdentity || submissionIdentity,
+      submission_identity: submissionIdentity,
     });
     setStorageError(out.saved ? null : (out.error ?? "storage failed"));
-  }, [key, surface, restored, submissionIdentity, restoredSubmissionIdentity]);
+  }, [key, surface, restored, submissionIdentity, attachments, identity]);
 
   const clearDraft = useCallback(() => {
+    if (getAuthUserId() !== identity) return;
     setDraftState("");
-    setRestoredSubmissionIdentity(null);
+    setAttachments([]);
+    setSubmissionIdentity(newSubmissionKey());
     clearStoredDraft(surface, key);
-  }, [key, surface]);
+  }, [key, surface, identity]);
 
-  return { draft, setDraft, clearDraft, restored, storageError, restoredSubmissionIdentity };
+  return { draft, setDraft, clearDraft, restored, storageError, submissionIdentity, attachments };
 }

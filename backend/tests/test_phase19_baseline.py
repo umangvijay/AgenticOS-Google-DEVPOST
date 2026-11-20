@@ -180,16 +180,28 @@ def test_c8_run_completed_substring_probe():
         "C8 reopened: substring completion matching is still present"
 
 
-def test_c9_empty_submission_identity_saved():
-    """C9 probe: the composer's draft saves empty submission_identity and
-    attachments instead of the pending identity."""
-    import inspect
-    src = open("frontend/src/components/ChatComposer.tsx").read()
-    # The composer passes the submission key INTO the draft hook
-    # (useDraft(threadId, surface, submissionIdentity)), and the hook
-    # persists it into the draft record — the full production path.
-    assert "submissionIdentity" in src or "submissionKey" in src, \
-        "C9 reopened: the composer does not pass the submission identity"
-    hook_src = open("frontend/src/hooks/useDraft.ts").read()
-    assert "submission_identity: submissionIdentity" in hook_src, \
-        "C9 reopened: the hook persists an empty submission identity"
+@pytest.mark.asyncio
+async def test_c9_empty_submission_identity_saved(tmp_path):
+    """A retry with the restored draft key resolves to the original run.
+
+    The mounted draft and production browser tests exercise localStorage and
+    the outgoing request. This side exercises durable command acceptance.
+    """
+    from backend.repositories.command_repository import SQLiteCommandRepository
+    from backend.repositories.sqlite.database import DatabaseManager
+    from backend.services.command_service import accept_command, set_command_repo
+
+    db = DatabaseManager(str(tmp_path / "draft-retry.db"))
+    await db.initialize()
+    try:
+        set_command_repo(SQLiteCommandRepository(db))
+        request = dict(command_type="workflow", owner_user_id="draft-owner",
+                       idempotency_key="sub-restored-draft", request_digest="same-request")
+        first = await accept_command(**request, run_id="original-run")
+        retry = await accept_command(**request, run_id="duplicate-run")
+        assert first.accepted and retry.accepted and retry.deduplicated
+        assert retry.command_id == first.command_id
+        assert retry.run_id == "original-run"
+    finally:
+        set_command_repo(None)
+        await db.close()

@@ -61,6 +61,14 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['rm', '-f', 'agentos-ci-pg']
 
+  # Draft persistence runs in the browser. Exercise the hook and storage
+  # together in the frontend suite alongside the Python command-retry tests.
+  - id: frontend-unit-tests
+    name: 'node:26-bookworm-slim'
+    dir: frontend
+    entrypoint: sh
+    args: ['-ec', 'npm ci --no-audit --no-fund && npm test']
+
 images:
   - '${_API_IMAGE}'
   - '${_WORKER_IMAGE}'

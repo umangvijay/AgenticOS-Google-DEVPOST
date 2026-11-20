@@ -162,26 +162,39 @@ for (const status of ['COMPLETED', 'CANCELLED', 'FAILED', 'NEEDS_REVIEW', 'EXPIR
   });
 }
 
-test('a failed submission keeps the text and retries with the same submission identity', async ({ page }) => {
+test('a failed submission restores text, attachment references and the retry key after reload', async ({ page }) => {
   await fixture(page, [savedRun('first', 'Hello', 'Hello back')]);
   const keys: (string | undefined)[] = [];
+  const bodies: unknown[] = [];
   await page.route('**/api/v1/workflows', async route => {
     if (route.request().method() !== 'POST') return route.fallback();
+    bodies.push(route.request().postDataJSON());
     keys.push(route.request().headers()['idempotency-key']);
     if (keys.length === 1) return route.abort();
     return route.fallback();
   });
   await page.goto('/dashboard/workspace/first');
   const input = page.getByRole('textbox', { name: 'Message', exact: true });
+  const file = { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('attachment body') };
+  const upload = page.locator('input[type=file]').last();
+  await upload.setInputFiles(file);
   await input.fill('Keep this draft after a network failure');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByText(/Could not reach the API/)).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('notes.txt · Reselect file')).toBeVisible();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect(page.getByText('Reselect or remove the missing files before sending.')).toBeVisible();
+  expect(keys).toHaveLength(1);
+  await upload.setInputFiles(file);
   await expect(input).toHaveValue('Keep this draft after a network failure');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByText('The follow-up answer is saved.', { exact: true })).toBeVisible();
   expect(keys).toHaveLength(2);
   expect(keys[0]).toBeTruthy();
   expect(keys[1]).toBe(keys[0]);
+  expect(bodies[0]).toMatchObject({ attachments: [{ name: 'notes.txt', text: 'attachment body' }] });
+  expect(bodies[1]).toEqual(bodies[0]);
 });
 
 test('Codex card and nested steps expand independently, preserve state, and dismiss by keyboard', async ({ page }) => {

@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator, Field
 from typing import List, Optional
 import json
+from backend.services.gemini_catalog import DEFAULT_ALLOWED_MODELS
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -90,15 +91,11 @@ class Settings(BaseSettings):
     FIRESTORE_COLLECTION_TASKS: str = "tasks"
 
     # ── Gemini AI ────────────────────────────────────────────────
-    # Text/tool models from the Vertex catalog (checked 2026-11-18).
-    # Keep Flash as the default; users may explicitly select Hydrogen/Argon/Pro.
+    # Text/tool models from the Vertex catalog (checked 2026-11-19).
+    # Keep Flash as the default; project access requires runtime identity probes.
     # Flash 3.6 retires 2026-11-19 and is omitted from the default allow-list.
     GEMINI_MODEL: str = "gemini-3.8-flash"
-    GEMINI_ALLOWED_MODELS: str = (
-        "gemini-3.8-flash,gemini-3.7-flash,gemini-3.5-flash,"
-        "gemini-3.5-flash-lite,gemini-3.1-flash-lite,"
-        "gemini-4-hydrogen,gemini-4-argon,gemini-3.1-pro-preview"
-    )
+    GEMINI_ALLOWED_MODELS: str = DEFAULT_ALLOWED_MODELS
     GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"
     GEMINI_EMBEDDING_REGION: str = "us-central1"
     GEMINI_API_KEY: Optional[str] = None

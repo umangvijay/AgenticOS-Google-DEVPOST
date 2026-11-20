@@ -126,7 +126,9 @@ export default function AgentsPage() {
           {plugins.map(plugin => <article className="glass-card" key={plugin.id} style={{ padding: 18, display: "flex", gap: 16, justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" }}>
             <div><div style={{ display: "flex", alignItems: "center", gap: 10 }}><strong>{plugin.manifest.name}</strong><span className={`badge ${plugin.state === "ENABLED" ? "badge-success" : "badge-neutral"}`}>{plugin.state}</span></div>
               <p style={{ color: "var(--text-secondary)", fontSize: 13, margin: "7px 0" }}>{plugin.manifest.description}</p>
-              <div style={{ color: "var(--text-tertiary)", fontSize: 12 }}>{plugin.manifest.agents.map(agent => agent.display_name).join(", ")} · {plugin.manifest.required_tools.length} scoped tools</div>
+              {plugin.state === "ENABLED" && <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+                Start a chat message with {plugin.manifest.agents.map(agent => `@${agent.agent_id}`).join(" or ")} to use this agent.
+              </div>}
             </div>
             <button className="btn btn-secondary" disabled={busy || !["ENABLED", "DISABLED"].includes(plugin.state)} onClick={() => void toggle(plugin, plugin.state !== "ENABLED")}>
               {plugin.state === "ENABLED" ? "Disable" : plugin.state === "DISABLED" ? "Enable" : "Unavailable"}

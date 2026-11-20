@@ -1099,7 +1099,7 @@ if __name__ == "__main__":
         from backend.agents.agent_factory import AgentFactory
         from backend.services.runtime_snapshot import RuntimeSnapshotRegistry
         snapshot_registry = RuntimeSnapshotRegistry()
-        agent_factory = AgentFactory(snapshot_registry, tool_router)
+        agent_factory = AgentFactory(snapshot_registry, tool_router, plugin_repo=factory.plugin_repo)
 
         # Workflow engine
         from backend.engine.engine import WorkflowEngine

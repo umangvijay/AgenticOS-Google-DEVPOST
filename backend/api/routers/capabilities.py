@@ -10,6 +10,7 @@ GET  /api/v1/capabilities/generate/{job_id}
 import asyncio
 import logging
 import uuid
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -25,6 +26,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/capabilities", tags=["capabilities"])
 
 _JOBS: dict[str, dict] = {}
+_RUNNING_JOBS: set[asyncio.Task] = set()
+GENERATION_TIMEOUT_SECONDS = 30 * 60
 
 
 class SiteHealthRequest(BaseModel):
@@ -49,9 +52,15 @@ async def _apply_user_key(request, user_id: str) -> None:
     factory = getattr(request.app.state, "factory", None)
     if factory:
         from backend.services.llm_context import load_user_llm_keys
-        await load_user_llm_keys(factory.secrets_repo, user_id)
         from backend.services.llm_context import load_user_model
-        await load_user_model(factory.settings_repo, user_id)
+        try:
+            await load_user_llm_keys(factory.secrets_repo, user_id)
+            await load_user_model(factory.settings_repo, user_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="The saved model is unavailable. Choose an enabled model in Settings and retry.") from exc
+        except Exception as exc:
+            logger.exception("Could not load Studio model configuration")
+            raise HTTPException(status_code=503, detail="Could not load model settings or credentials. Please retry.") from exc
 
 
 def _put_job(job: dict) -> None:
@@ -69,26 +78,31 @@ def _put_job(job: dict) -> None:
     if (settings.STORAGE_BACKEND or "").lower() != "firestore" or not settings.GOOGLE_CLOUD_PROJECT:
         return
     from google.cloud import firestore as fs
-    fs.Client(project=settings.GOOGLE_CLOUD_PROJECT).collection("artifact_jobs").document(job["job_id"]).set(job)
+    fs.Client(project=settings.GOOGLE_CLOUD_PROJECT, database=settings.FIRESTORE_DATABASE_ID).collection("artifact_jobs").document(job["job_id"]).set(job)
 
 
 def _get_job(job_id: str) -> Optional[dict]:
     if (settings.STORAGE_BACKEND or "").lower() != "firestore" or not settings.GOOGLE_CLOUD_PROJECT:
-        if job_id in _JOBS:
-            return dict(_JOBS[job_id])
         import json
         from backend.services.artifact_builder import artifacts_root
         try:
             safe_id = str(uuid.UUID(job_id))
             path = artifacts_root() / "_jobs" / f"{safe_id}.json"
-            return json.loads(path.read_text()) if path.exists() else None
-        except (ValueError, OSError):
+            with path.open() as saved:
+                data = json.load(saved)
+                if data.get("status") in ("queued", "running") and "deadline_at" not in data:
+                    import os
+                    data["deadline_at"] = os.fstat(saved.fileno()).st_mtime + GENERATION_TIMEOUT_SECONDS
+            return data
+        except (ValueError, FileNotFoundError):
             return None
     from google.cloud import firestore as fs
-    doc = fs.Client(project=settings.GOOGLE_CLOUD_PROJECT).collection("artifact_jobs").document(job_id).get()
+    doc = fs.Client(project=settings.GOOGLE_CLOUD_PROJECT, database=settings.FIRESTORE_DATABASE_ID).collection("artifact_jobs").document(job_id).get()
     if not doc.exists:
         return None
     data = doc.to_dict() or {}
+    if data.get("status") in ("queued", "running") and "deadline_at" not in data:
+        data["deadline_at"] = doc.update_time.timestamp() + GENERATION_TIMEOUT_SECONDS
     _JOBS[job_id] = data
     return data
 
@@ -157,20 +171,38 @@ async def ping_gemini(body: PingRequest, request: Request, user: AuthenticatedUs
 
 
 async def _run_generate_job(job_id: str, user_id: str, brief: str, kind: str, name: str, scale: str) -> None:
-    job = await asyncio.to_thread(_get_job, job_id) or {"job_id": job_id, "user_id": user_id}
-    job["status"] = "running"
-    await asyncio.to_thread(_put_job, job)
+    from backend.services.artifact_builder import ArtifactError, generate_project
+    from backend.services.gemini_client import GeminiQuotaExceeded
+    job = {"job_id": job_id, "user_id": user_id}
     try:
-        from backend.services.artifact_builder import generate_project
+        job = await asyncio.to_thread(_get_job, job_id) or job
+        job.update(status="running", updated_at=time.time())
+        await asyncio.to_thread(_put_job, job)
         async def progress(update):
-            job.update(update)
+            job.update(update, updated_at=time.time())
             await asyncio.to_thread(_put_job, dict(job))
-        result = await generate_project(user_id, brief, kind=kind, name=name, scale=scale, on_progress=progress)
-        job.update({"status": "completed", "result": result, "error": None})
-    except Exception as e:
+        async with asyncio.timeout(GENERATION_TIMEOUT_SECONDS):
+            result = await generate_project(user_id, brief, kind=kind, name=name, scale=scale, on_progress=progress)
+        job.update(status="completed", result=result, error=None)
+    except asyncio.CancelledError:
+        job.update(status="failed", error="Generation was interrupted by a server restart. Please retry.", result=None)
+        raise
+    except ArtifactError as exc:
+        job.update(status="failed", error=str(exc), result=None)
+    except GeminiQuotaExceeded:
+        job.update(status="failed", error="The model quota is exhausted. Check the provider quota or select another available model.", result=None)
+    except TimeoutError:
+        job.update(status="failed", error="Generation exceeded its time limit. Try a smaller project.", result=None)
+    except Exception:
         logger.exception("Studio generate job %s failed", job_id)
-        job.update({"status": "failed", "error": "Generation failed. Check model configuration and retry.", "result": None})
-    await asyncio.to_thread(_put_job, job)
+        job.update(status="failed", error="Generation failed. Check the selected model, provider quota, and project size, then retry.", result=None)
+    finally:
+        job["updated_at"] = time.time()
+        try:
+            await asyncio.to_thread(_put_job, job)
+        except Exception:
+            logger.exception("Could not persist terminal Studio job %s", job_id)
+
 
 
 @router.post("/generate", status_code=status.HTTP_202_ACCEPTED)
@@ -182,9 +214,13 @@ async def generate(body: GenerateRequest, request: Request, user: AuthenticatedU
     from backend.security.rate_limiter import check_shared_rate_limit
     await check_shared_rate_limit(f"user:{user.user_id}", group="capabilities")
     await _apply_user_key(request, user.user_id)
+    if not body.brief.strip():
+        raise HTTPException(status_code=400, detail="Describe the project you want to create.")
     job_id = str(uuid.uuid4())
     job = {
         "job_id": job_id,
+        "created_at": time.time(),
+        "deadline_at": time.time() + GENERATION_TIMEOUT_SECONDS,
         "user_id": user.user_id,
         "status": "queued",
         "kind": body.kind,
@@ -192,16 +228,32 @@ async def generate(body: GenerateRequest, request: Request, user: AuthenticatedU
         "result": None,
         "error": None,
     }
-    await asyncio.to_thread(_put_job, job)
-    asyncio.create_task(_run_generate_job(job_id, user.user_id, body.brief, body.kind, body.name, body.scale))
+    try:
+        await asyncio.to_thread(_put_job, job)
+    except Exception as exc:
+        logger.exception("Could not accept Studio job")
+        raise HTTPException(status_code=503, detail="Project storage is temporarily unavailable. No generation was started.") from exc
+    task = asyncio.create_task(_run_generate_job(job_id, user.user_id, body.brief, body.kind, body.name, body.scale))
+    _RUNNING_JOBS.add(task)
+    task.add_done_callback(_RUNNING_JOBS.discard)
     return {"job_id": job_id, "status": "queued"}
 
 
 @router.get("/generate/{job_id}")
 async def generate_status(job_id: str, user: AuthenticatedUser = Depends(require_not_viewer)):
-    job = await asyncio.to_thread(_get_job, job_id)
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Generate job not found")
+    try:
+        job = await asyncio.to_thread(_get_job, job_id)
+    except Exception as exc:
+        logger.exception("Could not read Studio job status")
+        raise HTTPException(status_code=503, detail="Project status is temporarily unavailable. Your generation may still be running.") from exc
     if not job or job.get("user_id") != user.user_id:
         raise HTTPException(status_code=404, detail="Generate job not found")
+    if job.get("status") in ("queued", "running") and job.get("deadline_at", float("inf")) < time.time():
+        return {**job, "status": "failed", "error": "Generation timed out or was interrupted. Try a smaller project."}
     return job
 
 

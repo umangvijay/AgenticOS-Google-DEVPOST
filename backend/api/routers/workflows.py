@@ -421,10 +421,9 @@ async def create_workflow(
 
             catalog_blob = json.dumps(live_catalog)
             enabled_agents = []
-            registry = getattr(request.app.state, "snapshot_registry", None)
-            if registry:
-                snapshot = registry.get_snapshot()
-                for plugin in snapshot.active_plugins:
+            plugin_repo = getattr(factory, "plugin_repo", None)
+            if plugin_repo is not None:
+                for plugin in await plugin_repo.list_all(user.user_id):
                     if plugin.state.value != "ENABLED":
                         continue
                     if plugin.manifest.scope.value == "USER" and plugin.installed_by != user.user_id:
@@ -452,7 +451,7 @@ async def create_workflow(
             from backend.engine.plan_repair import validate_or_repair
             async def repair_plan(prompt):
                 repaired_events = await gemini_client.run_adk_debug(
-                    lambda model: get_planner_agent(catalog_json=catalog_blob, model=model),
+                    lambda model: get_planner_agent(catalog_json=catalog_blob, model=model, agents_json=agents_blob),
                     prompt, settings.APP_NAME,
                 )
                 return extract_event_text(repaired_events)

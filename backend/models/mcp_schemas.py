@@ -99,6 +99,7 @@ class MCPManifest(BaseModel):
     source_uri: Optional[str] = None
     built_at: Optional[datetime] = None
     description: str = ""
+    active_revision_id: Optional[str] = None
     trust_tier: str = "pending_review"
     source_type: str = "openapi"
     # Audit G06: where the operation definitions came from. official_spec |

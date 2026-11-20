@@ -321,21 +321,25 @@ class WorkflowEngine:
                                    for t in run.tasks)
             if any_failed:
                 run.status = TaskStatus.FAILED
-                self._emit_event(WorkflowEventType.WORKFLOW_FAILED, run_id, run.workflow_id, summary="Workflow failed")
+                terminal_event = WorkflowEventType.WORKFLOW_FAILED
+                terminal_summary = "Workflow failed"
                 await self._sync_command_terminal(run_id, "FAILED")
             elif any_needs_review:
                 run.status = TaskStatus.NEEDS_REVIEW
-                self._emit_event(WorkflowEventType.WORKFLOW_NEEDS_REVIEW, run_id, run.workflow_id,
-                                 summary="Workflow paused: verification needs review")
+                terminal_event = WorkflowEventType.WORKFLOW_NEEDS_REVIEW
+                terminal_summary = "Workflow paused: verification needs review"
                 await self._sync_command_terminal(run_id, "NEEDS_REVIEW")
             else:
                 run.status = TaskStatus.COMPLETED
-                self._emit_event(WorkflowEventType.WORKFLOW_COMPLETED, run_id, run.workflow_id, summary="Workflow completed")
+                terminal_event = WorkflowEventType.WORKFLOW_COMPLETED
+                terminal_summary = "Workflow completed"
                 await self._sync_command_terminal(run_id, "SUCCEEDED")
             if hasattr(self.repo, "update_run_status"):
                 await maybe_await(self.repo.update_run_status(run_id, run.status))
             else:
                 await persist_run(self.repo, run)
+            # Clients reconcile on this event: the snapshot must already be durable.
+            await self._emit_event_sync(terminal_event, run_id, run.workflow_id, summary=terminal_summary)
             logger.info(f"Run {run_id} marked as {run.status}")
             asyncio.create_task(self._on_run_finished(run, run.status))
 
@@ -1344,6 +1348,7 @@ class WorkflowEngine:
             )
             await maybe_await(self.repo.save_event(event.model_dump(mode="json")))
 
+        context["workflow_engine"] = self
         context["emit_progress"] = _emit_progress
         context["emit_browser_frame"] = _emit_browser_frame
 
@@ -1504,9 +1509,9 @@ class WorkflowEngine:
             _model_started = _time.monotonic()
             try:
                 if agent_id and self.agent_factory:
-                    agent = self.agent_factory.build_agent(agent_id, context=context, model=model_name)
+                    agent = await self.agent_factory.build_for_run(agent_id, context=context, model=model_name)
                     if not agent:
-                        raise ValueError(f"Plugin agent {agent_id} could not be resolved.")
+                        raise ValueError(f"Agent @{agent_id} is unavailable. Check the agent ID and enable it in Agents.")
                 else:
                     from backend.services.embedding_service import GoogleCloudEmbeddingService
                     agent = get_orchestrator_agent(
@@ -1589,6 +1594,8 @@ class WorkflowEngine:
                 rewarded_model = model_name
                 _fallback_latency_ms = (time.monotonic() - _model_started) * 1000
                 break
+            except ApprovalRequiredException:
+                raise
             except Exception as e:
                 last_err = e
                 if gemini_client.is_retryable_model_error(e):
@@ -1598,6 +1605,11 @@ class WorkflowEngine:
                 await adaptive.record(model_name, False, (time.monotonic() - _model_started) * 1000)
                 break
 
+        # A runner may emit progress before a tool pauses or fails. Partial
+        # events are not completion: propagate approvals/build waits and
+        # failures to execute_task so they get their durable task state.
+        if last_err is not None:
+            raise last_err
         if events is None:
             if rewarded_model is not None:
                 await adaptive.record(rewarded_model, False, 0)
@@ -1609,8 +1621,8 @@ class WorkflowEngine:
         # the next candidate instead of completing the task with an empty
         # reply (the comment above already declared the intent; the guard
         # now enforces it).
-        if isinstance(raw, dict) and not str(raw.get("reply") or
-                                             raw.get("message") or "").strip():
+        if not raw or (isinstance(raw, dict) and not str(raw.get("reply") or
+                                             raw.get("message") or "").strip()):
             await adaptive.record(rewarded_model or model_name, False,
                                   (time.monotonic() - _model_started) * 1000)
             raise RuntimeError(

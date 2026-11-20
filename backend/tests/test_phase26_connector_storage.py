@@ -94,3 +94,27 @@ async def test_managed_publication_cannot_override_user_control(store, intervent
         assert current is None
     else:
         assert current["is_enabled"] is (intervention == "none")
+
+
+@pytest.mark.asyncio
+async def test_existing_website_can_be_retested_without_enabling_it(store, monkeypatch):
+    from unittest.mock import AsyncMock
+    from backend.services import browser_connector_validation as validation
+    repo = connector_repo(store)
+    site = "https://music.youtube.com/"
+    await repo.register_mcp({"mcp_id": "website", "name": "YouTube Music", "owner": "alice",
+                             "transport": "internal", "source_type": "website", "source_uri": site,
+                             "spec_hash": "website-fixture", "auth": {"type": "NONE"}, "is_enabled": False})
+    await repo.cache_tools("website", [{"mcp_id": "website", "tool_name": "runOnSite",
+                                        "mcp_version": "v1", "risk_level": 3, "input_schema": {},
+                                        "operation": {"kind": "browser", "origin": site, "start_url": site}}])
+    monkeypatch.setattr(validation, "probe_start_page", AsyncMock(return_value={"http_status": 200, "title": "Music", "url": site}))
+    manifest = await repo.get_mcp("website")
+    await validation.validate_browser_connector(repo, manifest, await repo.get_cached_tools("website"), "alice")
+    fresh = await repo.get_mcp("website")
+    assert not fresh["is_enabled"]
+    assert fresh["trust_tier"] == "browser_ready" and fresh["active_revision_id"]
+    cached = {t["tool_name"]: t for t in await repo.get_cached_tools("website")}
+    assert set(cached) == {"readStartPage", "runOnSite"}
+    assert validation.has_valid_browser_probe(cached["readStartPage"], fresh)
+    assert not validation.has_valid_browser_probe(cached["runOnSite"], fresh)

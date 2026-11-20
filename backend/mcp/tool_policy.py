@@ -5,12 +5,16 @@ class ToolPolicy:
     def is_allowed(self, tool: CachedToolDefinition, mcp: MCPManifest, context: dict = None) -> ToolPolicyResult:
         if not mcp.is_enabled:
             return ToolPolicyResult(allowed=False, reason="MCP is disabled")
+        if tool.mcp_id != mcp.mcp_id:
+            return ToolPolicyResult(allowed=False, reason="Tool does not belong to this MCP")
+        if (tool.operation or {}).get("kind") == "browser":
+            from backend.services.browser_connector_validation import has_valid_browser_probe
+            valid = has_valid_browser_probe(tool.model_dump(mode="json"), mcp.model_dump(mode="json"))
+            return ToolPolicyResult(allowed=valid, reason="Browser navigation test is current" if valid else "Run Test to validate this browser connector’s start pages")
         if mcp.trust_tier != "verified":
             return ToolPolicyResult(allowed=False, reason="Connector revision requires validation")
 
         # Health is informational — intermittent upstream 5xx should not block catalog or execution.
-        if tool.mcp_id != mcp.mcp_id:
-            return ToolPolicyResult(allowed=False, reason="Tool does not belong to this MCP")
 
         # Phase 6 §6.7/§6.12: evidence binds to the credential CONTEXT
         # (ref+version+epoch), derived from the auth blob — not the raw ref.

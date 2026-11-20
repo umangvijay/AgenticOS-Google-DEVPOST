@@ -68,6 +68,28 @@ class FirestoreMCPRepository(BaseMCPRepository):
             }
         )
 
+    async def list_public_mcps(self) -> List[Dict[str, Any]]:
+        db = await self._get_db()
+        # A single equality filter works without an additional composite index.
+        public = []
+        async for doc in db.collection("mcps").where("is_public", "==", True).stream():
+            data = doc.to_dict() or {}
+            if data.get("is_public") is True:
+                public.append(data)
+        return sorted(public, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+
+    async def set_public(self, mcp_id: str, is_public: bool) -> bool:
+        from google.api_core.exceptions import NotFound
+        db = await self._get_db()
+        try:
+            await db.collection("mcps").document(mcp_id).update({
+                "is_public": bool(is_public),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except NotFound:
+            return False
+        return True
+
     async def set_mcp_enabled(self, mcp_id: str, enabled: bool) -> None:
         db = await self._get_db()
         from google.cloud import firestore
@@ -129,7 +151,7 @@ class FirestoreMCPRepository(BaseMCPRepository):
             await doc.reference.delete()
         return True
 
-    async def cache_tools(self, mcp_id: str, tools: List[Any] = None) -> None:
+    async def cache_tools(self, mcp_id: str, tools: List[Any] = None, *, replace_all: bool = True) -> None:
         if isinstance(mcp_id, list) and tools is None:
             tools = mcp_id
             mcp_id = None
@@ -138,7 +160,7 @@ class FirestoreMCPRepository(BaseMCPRepository):
                 mcp_id = first.get("mcp_id")
         tools = tools or []
         db = await self._get_db()
-        if mcp_id:
+        if mcp_id and replace_all:
             async for doc in db.collection("mcp_tools").where("mcp_id", "==", mcp_id).stream():
                 await doc.reference.delete()
         if not tools:
@@ -222,7 +244,7 @@ class FirestoreMCPRepository(BaseMCPRepository):
             "started_at", direction="DESCENDING").limit(limit)
         return [doc.to_dict() async for doc in query.stream()]
 
-    async def activate_revision_atomic(self, mcp_id, revision_id, expected, actor):
+    async def activate_revision_atomic(self, mcp_id, revision_id, expected, actor, *, browser_ready=False):
         from google.cloud import firestore
         from backend.services.connector_activation import ActivationConflictError
         import uuid
@@ -240,7 +262,10 @@ class FirestoreMCPRepository(BaseMCPRepository):
             previous = (current_doc.to_dict() or {}).get("active_revision_id")
             if expected is not None and (previous or "") != expected:
                 raise ActivationConflictError("Active revision changed")
-            transaction.update(ref, {"active_revision_id": revision_id})
+            fields = {"active_revision_id": revision_id}
+            if browser_ready:
+                fields["trust_tier"] = "browser_ready"
+            transaction.update(ref, fields)
             transaction.create(activation_ref, {"revision_id": revision_id, "previous_revision_id": previous,
                                                 "actor": actor, "created_at": datetime.now(timezone.utc).isoformat()})
             return {"activated": True, "revision_id": revision_id, "previous_revision_id": previous}

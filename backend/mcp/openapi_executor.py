@@ -84,6 +84,11 @@ async def execute_openapi_tool(
     if not operation:
         raise ValueError(f"Tool {tool.get('tool_name')} has no stored OpenAPI operation")
     if operation.get("kind") == "browser":
+        if operation.get("action") == "read_start_page":
+            if arguments:
+                raise ValueError("Reading the start page takes no arguments")
+            from backend.services.browser_connector_validation import probe_start_page
+            return await probe_start_page(operation["start_url"], user_id)
         from backend.mcp.website_mcp import execute_browser_tool
         return await execute_browser_tool(
             tool, arguments, user_id=user_id, secrets_repo=secrets_repo,

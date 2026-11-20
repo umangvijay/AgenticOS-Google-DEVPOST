@@ -96,7 +96,9 @@ class VertexAIAdapter(ProviderAdapter):
                 model=self.config.model_id) + f"?key={self.config.api_key}"
         # Standard mode: project/location endpoint (ADC supplies auth
         # headers via the installed client at call time).
-        return (f"https://{self.config.location}-aiplatform.googleapis.com/"
+        host = ("aiplatform.googleapis.com" if self.config.location == "global"
+                else f"{self.config.location}-aiplatform.googleapis.com")
+        return (f"https://{host}/"
                 f"v1/projects/{self.config.project}/locations/"
                 f"{self.config.location}/publishers/google/models/"
                 f"{self.config.model_id}:generateContent")
@@ -188,8 +190,8 @@ class VertexAIAdapter(ProviderAdapter):
         body = build_generate_request(messages, max_tokens=max_tokens,
                                       temperature=temperature)
         body["generationConfig"]["candidateCount"] = 1
-        endpoint = self._endpoint().replace(
-            ":generateContent", ":streamGenerateContent?alt=sse")
+        endpoint = self._endpoint().replace(":generateContent", ":streamGenerateContent")
+        endpoint += ("&" if "?" in endpoint else "?") + "alt=sse"
         headers = {"Content-Type": "application/json"}
         if not self.config.api_key:
             import google.auth

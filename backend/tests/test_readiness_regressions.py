@@ -295,9 +295,10 @@ async def test_generation_reports_real_stages_and_rejects_missing_files(monkeypa
     monkeypatch.setattr(gemini_client,'generate_json',AsyncMock(side_effect=[
         {'name':'Demo','files':[{'path':'index.html','purpose':'Home'},{'path':'styles.css','purpose':'Styles'}]},
         {'files':[{'path':'index.html','content':'<h1>Hello</h1>'}]},
+        {'files':[]},  # Single-file recovery also missed styles.css.
     ]))
     progress=AsyncMock()
-    with pytest.raises(builder.ArtifactError,match='do not match'):
+    with pytest.raises(builder.ArtifactError,match='required file: styles.css'):
         await builder.generate_project('user','A website',scale='standard',on_progress=progress)
     assert progress.call_args_list[0].args[0]['stage']=='planning'
     assert progress.call_args_list[1].args[0]['stage']=='writing_files'
@@ -471,7 +472,7 @@ async def test_specialist_agents_persist_scope_enable_and_dispatch(tmp_path):
         manifest = PluginManifest(plugin_id='writer', name='Writer', version='1.0.0',
             description='Writes summaries', author='test', agentos_version='1.0.0',
             requested_permissions=[], required_tools=['user-mcp__read'],
-            agents=[PluginAgentDefinition(agent_id='writer.summarize', display_name='Summarizer',
+            agents=[PluginAgentDefinition(agent_id='writer.summarize', display_name='My Summary Writer',
                 instructions='Summarize source material.', allowed_tools=['user-mcp__read'])],
             scope=PluginScope.USER, manifest_hash='')
         manifest.manifest_hash = hashlib.sha256(manifest.model_dump_json(exclude={'manifest_hash'}, exclude_none=True).encode()).hexdigest()
@@ -484,10 +485,16 @@ async def test_specialist_agents_persist_scope_enable_and_dispatch(tmp_path):
         agent_factory = AgentFactory(snapshots, tool_router=SimpleNamespace(execute_tool_safe=AsyncMock()))
         assert agent_factory.build_agent('writer.summarize', context={'user_id':'alice'}) is not None
         assert agent_factory.build_agent('writer.summarize', context={'user_id':'bob'}) is None
+        # A separate worker sees changes made by the API after worker startup.
+        worker = AgentFactory(RuntimeSnapshotRegistry(), agent_factory.tool_router, plugin_repo=repo)
+        selected = await worker.build_for_run('writer.summarize', {'user_id': 'alice'}, None)
+        assert selected.name == 'plugin_writer_summarize' and selected.description == 'My Summary Writer'
+        assert await worker.build_for_run('writer.summarize', {'user_id': 'bob'}, None) is None
         with pytest.raises(ValueError, match='only be disabled by their owner'):
             await registry.disable_plugin(saved.id, 'bob')
         await registry.disable_plugin(saved.id, 'alice')
         assert snapshots.get_snapshot().active_plugins == []
+        assert await worker.build_for_run('writer.summarize', {'user_id': 'alice'}, None) is None
     finally:
         await db.close()
 

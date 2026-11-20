@@ -12,7 +12,16 @@ function syncDirectory(source, destination) {
 }
 
 if (fs.existsSync(standalone)) {
-  syncDirectory(path.join(root, ".next", "static"), path.join(standalone, ".next", "static"));
-  syncDirectory(path.join(root, "public"), path.join(standalone, "public"));
+  // Next traces this repository as a monorepo locally, but Docker builds
+  // frontend alone. Copy assets beside the server for THIS build in either layout.
+  const buildId = fs.readFileSync(path.join(root, ".next", "BUILD_ID"), "utf8");
+  const serverRoot = [standalone, path.join(standalone, "frontend")].find(candidate => {
+    const id = path.join(candidate, ".next", "BUILD_ID");
+    return fs.existsSync(path.join(candidate, "server.js")) && fs.existsSync(id)
+      && fs.readFileSync(id, "utf8") === buildId;
+  });
+  if (!serverRoot) throw new Error("No standalone server matches the current build");
+  syncDirectory(path.join(root, ".next", "static"), path.join(serverRoot, ".next", "static"));
+  syncDirectory(path.join(root, "public"), path.join(serverRoot, "public"));
   console.log("Prepared standalone server with static and public assets.");
 }

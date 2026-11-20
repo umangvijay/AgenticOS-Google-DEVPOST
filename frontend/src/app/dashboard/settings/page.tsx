@@ -6,12 +6,17 @@ import ApiKeyManager from "@/components/ApiKeyManager";
 import TokenStatusCard from "@/components/TokenStatusCard";
 import { applyTheme, type ThemePref } from "@/lib/theme";
 import { useAuth } from "@/lib/auth-context";
+import ModelSelector from "@/components/ModelSelector";
+import type { ModelCatalog } from "@/lib/api";
 
 export default function SettingsPage() {
   const { user, updateProfile } = useAuth();
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalog>();
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState({ text: "", type: "" });
 
@@ -60,19 +65,23 @@ export default function SettingsPage() {
   };
 
   useEffect(() => {
+    let active = true;
     async function load() {
       try {
-        const { settings: s, available_models } = await getSettings();
+        const { settings: s, available_models, model_catalog } = await getSettings();
+        if (!active) return;
         setAvailableModels(available_models || []);
+        setModelCatalog(model_catalog);
         setSettings(s);
       } catch (err) {
-        console.error(err);
+        if (active) setLoadError(err instanceof Error ? err.message : "Please try again in a moment.");
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     }
     load();
-  }, []);
+    return () => { active = false; };
+  }, [loadAttempt]);
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -143,17 +152,20 @@ export default function SettingsPage() {
     </div>
   );
 
+  if (loadError) return (
+    <section className="glass-card load-error" role="alert">
+      <h1>Couldn’t load settings</h1>
+      <p>{loadError}</p>
+      <button className="btn btn-secondary" onClick={() => { setLoadError(""); setLoading(true); setLoadAttempt(n => n + 1); }}>Try again</button>
+    </section>
+  );
+
   return (
     <div className="animate-fade-in" data-scroll-reveal style={{ maxWidth: 800, margin: "0 auto" }}>
       <div style={{ marginBottom: 32 }}>
         <h1 style={{ fontSize: 24, fontWeight: 700 }}>Settings</h1>
         <p style={{ color: "var(--text-secondary)" }}>Manage your account and Sandtable preferences.</p>
-      <div style={{ marginTop: 14 }}>
-        <span className="trust-badge">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z" /></svg>
-          Protected by industry-standard AES-256 and end-to-end client-side encryption
-        </span>
-      </div>
+
       </div>
 
       <form onSubmit={handleSaveSettings}>
@@ -307,14 +319,12 @@ export default function SettingsPage() {
               </select>
             </div>
             <div style={{ flex: 1 }}>
-              <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 6 }}>Default LLM Model</label>
-              <select 
-                className="input" 
-                value={settings?.default_model || "gemini-3.7-flash"}
-                onChange={e => setSettings(s => s ? {...s, default_model: e.target.value} : s)}
-              >
-                {availableModels.map(model => <option key={model} value={model}>{model}</option>)}
-              </select>
+              <ModelSelector label="Default AI model" value={settings?.default_model || ""}
+                onChange={model => setSettings(s => s ? {...s, default_model: model} : s)}
+                models={availableModels} catalog={modelCatalog} />
+              {modelCatalog?.auth_mode === "service_account_adc" && <p style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                Vertex AI uses the server’s Google Cloud service account. A Gemini API key is not required.
+              </p>}
             </div>
           </div>
         </div>

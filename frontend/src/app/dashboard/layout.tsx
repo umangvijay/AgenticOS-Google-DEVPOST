@@ -10,11 +10,10 @@ import BrandMark from "@/components/BrandMark";
 import { applyTheme, watchSystemTheme, type ThemePref } from "@/lib/theme";
 import { getUnreadCount, listNotifications, markNotificationRead, markAllNotificationsRead, listWorkflows, Notification, WorkflowRun } from "@/lib/api";
 import ContextUsageButton from "@/components/ContextUsage";
-import { AmbientOrbs } from "@/components/GlassPanel";
 
 // ── Navigation Items ─────────────────────────────────────────────
 const NEW_CHAT = {
-  label: "Board",
+  label: "New chat",
   href: "/dashboard",
   icon: (
     <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
@@ -375,10 +374,10 @@ function DashboardInner({ children }: { children: ReactNode }) {
   const isWorkspace = pathname === "/dashboard" || pathname.startsWith("/dashboard/workspace");
   const pageTitle =
     NAV_ITEMS.find((i) => pathname.startsWith(i.href))?.label
-    || (pathname.startsWith("/dashboard/workspace") ? "Chat" : "Board");
+    || (pathname.startsWith("/dashboard/workspace") ? "Chat" : "New chat");
 
   return (
-    <div className="mesh-gradient dashboard-shell">
+    <div className="dashboard-shell">
       {/* ── Sidebar ────────────────────────────────────────────── */}
       {/* Mobile overlay backdrop */}
       {mobileOpen && (
@@ -492,7 +491,7 @@ function DashboardInner({ children }: { children: ReactNode }) {
       </aside>
 
       {/* ── Main content ───────────────────────────────────────── */}
-      <AmbientOrbs />
+
       <div className={`main-content ${!isMobile && collapsed ? "sidebar-collapsed" : ""}`} style={{ flex: 1 }}>
         {/* LLM credential warning */}
         {llmStatus && ["invalid", "missing", "unknown", "catalog_ok"].includes(llmStatus.status) && !llmBannerDismissed && (

@@ -122,6 +122,21 @@ def evaluate_operation_eligibility(
     if manifest.get("auth") and binding_id is None:
         reasons.append(REASON_CREDENTIAL_MISSING)
 
+    if op.get("kind") == "browser":
+        from backend.services.browser_connector_validation import has_valid_browser_probe
+        if not has_valid_browser_probe(tool, {**manifest, "auth": auth_blob if auth_blob is not None else manifest.get("auth")}):
+            reasons.append(REASON_VALIDATION_MISSING)
+            missing.append("current browser start-page navigation test")
+        if required_scopes:
+            granted = set(credential_binding.granted_scopes) if credential_binding else set()
+            if set(required_scopes) - granted:
+                reasons.append(REASON_SCOPE_MISSING)
+        if runtime_digest and current_runtime_digest and runtime_digest != current_runtime_digest:
+            reasons.append(REASON_RUNTIME_CHANGED)
+        return OperationEligibility(allowed=not reasons, reason_codes=reasons,
+            revision_id=revision_id, operation_digest=op_digest,
+            credential_binding_id=binding_id, missing_requirements=missing)
+
     # 6. Required validation evidence (context-bound; §6.12 fixes the bypass).
     evidence = (op.get("_validation") or {})
     evidence_binding = evidence.get("credential_binding_id")

@@ -1,0 +1,16 @@
+# Local template only; never applied by the build. Replace the image before use.
+# Build with the final NEXT_PUBLIC_API_URL and NEXT_PUBLIC_SITE_URL first.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: sandtable
+spec:
+  template:
+    spec:
+      containers:
+        - image: REPLACE_WITH_TESTED_FRONTEND_IMAGE_AT_SHA256_DIGEST
+          ports:
+            - containerPort: 8080
+          env:
+            - name: NODE_ENV
+              value: production

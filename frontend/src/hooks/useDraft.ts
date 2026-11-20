@@ -1,9 +1,20 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useState, useSyncExternalStore } from "react";
 import {
   clearDraft as clearStoredDraft, loadDraft, saveDraft, getAuthUserId,
 } from "@/lib/draft-store";
+import { AUTH_CHANGED } from "@/lib/auth-session";
+
+function subscribeIdentity(onChange: () => void) {
+  window.addEventListener(AUTH_CHANGED, onChange);
+  window.addEventListener("storage", onChange);
+  return () => {
+    window.removeEventListener(AUTH_CHANGED, onChange);
+    window.removeEventListener("storage", onChange);
+  };
+}
+const serverIdentity = () => null;
 
 /**
  * Draft preservation (Phase 18 §18.19, finding F1) — ONE authoritative
@@ -23,31 +34,19 @@ export function useDraft(threadId: string | null | undefined,
   const [draft, setDraftState] = useState("");
   const [restored, setRestored] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
-  // §19 (C9): restoration RESETS when the authenticated identity
-  // changes — a stale identity's draft is never adopted or overwritten.
-  const [, setIdentity] = useState(getAuthUserId());
-
-  // Restore once per key AND identity — BEFORE any empty value can
-  // overwrite storage. react-hooks v6 (set-state-in-effect): identity
-  // changes and (key, surface) changes adjust DURING RENDER — the
-  // official adjust-on-prop-change pattern — so no setState runs
-  // synchronously inside an effect.
-  const [restoreStamp, setRestoreStamp] = useState(() => ({
-    identity: getAuthUserId(), key, surface,
-  }));
-  if (restoreStamp.identity !== getAuthUserId() ||
+  const identity = useSyncExternalStore(subscribeIdentity, getAuthUserId, serverIdentity);
+  const [restoredSubmissionIdentity, setRestoredSubmissionIdentity] = useState<string | null>(null);
+  const [restoreStamp, setRestoreStamp] = useState<{ identity: string | null; key: string | null; surface: string } | null>(null);
+  // Restore on the first mount as well as on thread/account changes. The
+  // external store supplies the server snapshot during hydration.
+  if (!restoreStamp || restoreStamp.identity !== identity ||
       restoreStamp.key !== key || restoreStamp.surface !== surface) {
-    const identityChanged = restoreStamp.identity !== getAuthUserId();
-    setRestoreStamp({ identity: getAuthUserId(), key, surface });
-    if (identityChanged) {
-      setIdentity(getAuthUserId());
-      setRestored(false);
-      setDraftState("");
-    } else {
-      const stored = loadDraft(surface, key);
-      setDraftState(stored?.text ?? "");
-      setRestored(true);
-    }
+    setRestoreStamp({ identity, key, surface });
+    const stored = identity ? loadDraft(surface, key) : null;
+    setDraftState(stored?.text ?? "");
+    setRestoredSubmissionIdentity(stored?.text ? stored.submission_identity : null);
+    setRestored(true);
+    setStorageError(null);
   }
 
   const setDraft = useCallback((value: string) => {
@@ -60,15 +59,16 @@ export function useDraft(threadId: string | null | undefined,
       // §19 (C9): the PENDING submission identity persists with the
       // draft — refresh after an accepted-but-unacknowledged submission
       // can recover the same intent.
-      submission_identity: submissionIdentity,
+      submission_identity: restoredSubmissionIdentity || submissionIdentity,
     });
     setStorageError(out.saved ? null : (out.error ?? "storage failed"));
-  }, [key, surface, restored, submissionIdentity]);
+  }, [key, surface, restored, submissionIdentity, restoredSubmissionIdentity]);
 
   const clearDraft = useCallback(() => {
     setDraftState("");
+    setRestoredSubmissionIdentity(null);
     clearStoredDraft(surface, key);
   }, [key, surface]);
 
-  return { draft, setDraft, clearDraft, restored, storageError };
+  return { draft, setDraft, clearDraft, restored, storageError, restoredSubmissionIdentity };
 }

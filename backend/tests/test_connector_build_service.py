@@ -253,3 +253,30 @@ async def test_phase3_enqueue_failure_settles_the_command(factory):
         assert row["status"] == "settled"
     finally:
         set_command_admission_repo(None)
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_dispatches_child_and_parks_parent_with_its_build_id(factory, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from backend.agents.orchestrator import orchestrator_agent
+    from backend.services.approvals_engine import ApprovalRequiredException
+
+    monkeypatch.setattr(orchestrator_agent, "adk_gemini", lambda model: "test-model")
+    engine = SimpleNamespace(evaluate_dag=AsyncMock())
+    factory.get_tool_catalog = AsyncMock(return_value=[{"name": "otherTool", "mcp_name": "YouTube Music"}])
+    agent = orchestrator_agent.get_orchestrator_agent(
+        tool_router=factory, user_id="alice", execution_context={
+            "run_id": "parent", "workflow_id": "wf", "task_id": "step", "workflow_engine": engine,
+        })
+    build = next(tool for tool in agent.tools if tool.__name__ == "build_integration")
+    with pytest.raises(ApprovalRequiredException) as paused:
+        await build("https://music.youtube.com/", "YouTube Music", required_operations="readStartPage")
+    approval = paused.value.pending_approval
+    assert approval.run_id == "parent" and approval.task_id == "step"
+    assert approval.arguments["_challenge_type"] == "capability_build"
+    child = await factory.workflow_repo.get_run(approval.arguments["build_run_id"])
+    engine.evaluate_dag.assert_awaited_once_with(child["run_id"])
+    record = await factory.mcp_repo.get_build(approval.arguments["build_id"])
+    assert record["parent_run_id"] == "parent" and record["method"] == "website"
+    assert record["required_operations"] == ["readStartPage"]

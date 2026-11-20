@@ -33,7 +33,7 @@ class PostgresConnectorContract:
                                        "ORDER BY (payload->>'started_at')::bigint DESC LIMIT $2", connector_id, limit)
         return [payload(row["payload"]) for row in rows]
 
-    async def activate_revision_atomic(self, mcp_id, revision_id, expected, actor):
+    async def activate_revision_atomic(self, mcp_id, revision_id, expected, actor, *, browser_ready=False):
         from backend.services.connector_activation import ActivationConflictError
         async with self.db.pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow("SELECT active_revision_id FROM pg_mcps WHERE id=$1 FOR UPDATE", mcp_id)
@@ -43,6 +43,8 @@ class PostgresConnectorContract:
             current = row["active_revision_id"]
             if expected is not None and (current or "") != expected:
                 raise ActivationConflictError("Active revision changed")
+            if browser_ready:
+                await conn.execute("UPDATE pg_mcps SET trust_tier='browser_ready' WHERE id=$1", mcp_id)
             await conn.execute("UPDATE pg_mcps SET active_revision_id=$2,updated_at=now() WHERE id=$1", mcp_id, revision_id)
             await conn.execute("INSERT INTO pg_connector_activations(activation_id,mcp_id,revision_id,previous_revision_id,actor) "
                                "VALUES($1,$2,$3,$4,$5)", "act_" + uuid.uuid4().hex, mcp_id, revision_id, current, actor)

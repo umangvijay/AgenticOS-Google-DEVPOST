@@ -7,17 +7,35 @@ import { ArtifactEvidencePanel } from "@/components/ArtifactEvidencePanel";
 function ResumeFromText({ jobDescription, onText }: { jobDescription: string; onText?: (text: string) => void }) {
   const [profile, setProfile] = useState("");
   const [busy, setBusy] = useState(false);
-  const [out, setOut] = useState<string>("");
+  const [preview, setPreview] = useState("");
+  const [warnings, setWarnings] = useState<{ field: string; reason: string }[]>([]);
+  const [error, setError] = useState("");
 
   async function run() {
     if (!profile.trim()) return;
     setBusy(true);
+    setError("");
+    setWarnings([]);
     try {
       const data = await createResumeFromText(profile, jobDescription, Boolean(jobDescription.trim()));
-      onText?.(profile);
-      setOut(JSON.stringify(data, null, 2));
+      // Phase 5: pass the GENERATED resume (not the raw notes) into the
+      // scanner's extracted-text flow, so "Scan & Analyze" can re-score
+      // the created document against a different job description.
+      const generated: string = typeof data.html === "string" ? data.html : "";
+      onText?.(generated || profile);
+      if (data.html && typeof data.html === "string") {
+        setPreview(data.html);
+      } else {
+        const rendered = await renderResumeHtml((data.resume || data) as Record<string, unknown>);
+        setPreview(rendered.html || "");
+      }
+      // §30.x provenance: show groundedness flags as readable warnings —
+      // raw JSON is for the Details expander, never the main surface.
+      const flags = (data as { fact_groundedness?: { unsupported_additions?: { field: string; reason: string }[] } })
+        .fact_groundedness?.unsupported_additions || [];
+      setWarnings(flags.map(f => ({ field: f.field, reason: f.reason })));
     } catch (e) {
-      setOut(e instanceof Error ? e.message : "Create failed");
+      setError(e instanceof Error ? e.message : "Create failed");
     } finally {
       setBusy(false);
     }
@@ -30,7 +48,27 @@ function ResumeFromText({ jobDescription, onText }: { jobDescription: string; on
       <button type="button" className="btn btn-secondary" style={{ marginTop: 8, width: "100%" }} disabled={busy || !profile.trim()} onClick={run}>
         {busy ? "Writing…" : "Create ATS resume"}
       </button>
-      {out && <pre style={{ marginTop: 12, fontSize: 11, maxHeight: 200, overflow: "auto", fontFamily: "var(--font-mono)" }}>{out}</pre>}
+      {error && <p style={{ marginTop: 8, fontSize: 13, color: "var(--error)" }}>{error}</p>}
+      {warnings.length > 0 && (
+        <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-secondary)" }}>
+          <strong style={{ color: "var(--warning, #b45309)" }}>Review the generated content:</strong>
+          <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+            {warnings.map((w, i) => (
+              <li key={i}>Field “{w.field}”: {w.reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {preview && (
+        <div style={{ marginTop: 12 }}>
+          <iframe
+            title="Generated resume preview"
+            sandbox=""
+            style={{ width: "100%", height: 420, border: "1px solid var(--border-primary)", borderRadius: 8, background: "white" }}
+            srcDoc={preview}
+          />
+        </div>
+      )}
     </div>
   );
 }

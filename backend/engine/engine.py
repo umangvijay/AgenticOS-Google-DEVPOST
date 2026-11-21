@@ -1113,12 +1113,25 @@ class WorkflowEngine:
                 response.raise_for_status()
                 chunks = []
                 size = 0
+                # aiter_bytes() yields FULLY DECOMPRESSED bytes (httpx applies
+                # the Content-Encoding decoder inside the stream). The response
+                # below is rebuilt from those plain bytes, so the transport
+                # headers that describe the WIRE encoding — Content-Encoding and
+                # the pre-decompression Content-Length — must be dropped, or the
+                # reconstructed Response decodes a SECOND time and fails on real
+                # sites: gzip → "Error -3 ... incorrect header check", brotli →
+                # "brotli: decoder failed" (both observed in production audits).
+                skip = {"content-encoding", "content-length"}
+                resp_headers = [
+                    (k, v) for k, v in response.headers.items()
+                    if k.lower() not in skip
+                ]
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
                     if size > 5 * 1024 * 1024:
                         raise ValueError("HTTP response exceeds the 5 MB limit")
                     chunks.append(chunk)
-                resp = httpx.Response(response.status_code, headers=response.headers, content=b"".join(chunks))
+                resp = httpx.Response(response.status_code, headers=resp_headers, content=b"".join(chunks))
             try:
                 return {"status_code": resp.status_code, "data": resp.json()}
             except Exception:

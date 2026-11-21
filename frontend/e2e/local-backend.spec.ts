@@ -74,8 +74,8 @@ test.describe.serial('real-backend journeys', () => {
 
     // The workspace reflects the REAL run reaching COMPLETED.
     await expect(
-      page.getByText('COMPLETED', { exact: false }).first(),
-    ).toBeVisible({ timeout: 120000 });
+      page.getByRole('region', { name: 'Run summary' }).getByRole('status'),
+    ).toHaveText('Completed', { timeout: 120000 });
 
     // Cross-check through the REAL API with the SAME identity: the run
     // completed with REAL output data about the real target.

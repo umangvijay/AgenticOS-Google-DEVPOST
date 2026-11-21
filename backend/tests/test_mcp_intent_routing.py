@@ -138,3 +138,5 @@ async def test_requirements_reply_is_available_during_a_model_outage(monkeypatch
     result = await WorkflowEngine(None, None)._execute_core_node(task, task.input_data, SimpleNamespace(tasks=[]))
     assert "API documentation URL" in result["reply"]
     assert "Vault" in result["reply"]
+    assert "Model Context Protocol" in result["reply"]
+    assert plan_from_goal("What is an MCP server?").tasks[0].input_data == {"prompt": "What is an MCP server?"}

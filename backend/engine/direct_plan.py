@@ -363,7 +363,10 @@ def plan_from_goal(goal: str, prior_goal: str = "", catalog: Optional[Sequence[A
     mentions_connector = any(word in lowered for word in MCP_PHRASES + TOOL_PHRASES)
     asks_requirements = bool(re.search(
         r"\b(?:what|which)\b.{0,55}\b(?:need|required|requirements|require)\b|"
-        r"^(?:how (?:do|can|would)|what is|what are|explain)\b", lowered))
+        r"^(?:how (?:do|can|would))\b.{0,45}\b(?:create|build|make|connect)\b", lowered))
+    if mentions_connector and not asks_requirements and re.match(r"^(?:explain|what (?:is|are)|how does)\b", lowered):
+        return WorkflowDefinition(tasks=[TaskDefinition(task_id="chat-1", agent="core.chat",
+            input_data={"prompt": text}, timeout_seconds=60)])
     if mentions_connector and (asks_requirements or (
         not _has_concrete_mcp_target(text, url) and
         not re.search(r"\b(?:youtube|yt|github|gitlab)\b", lowered) and

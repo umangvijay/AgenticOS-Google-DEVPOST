@@ -1222,6 +1222,13 @@ class WorkflowEngine:
         elif task.agent == "core.chat":
             from backend.services import gemini_client
             prompt = str(interpolated_input.get("prompt") or interpolated_input.get("goal") or run.goal or "").strip()
+            if interpolated_input.get("topic") == "connector_requirements" and not task.dependencies:
+                reply = ("Yes. I can create a Model Context Protocol (MCP) tool for a documented API "
+                         "or a supported website action. Which service should it connect to, and what "
+                         "should it do? Share its website or API documentation URL. I can look there "
+                         "for the API definition. If the operation needs a private account, connect it "
+                         "through Vault. I test the operation before making it available in Stamps.")
+                return {"reply": reply, "message": reply}
             dependency_results = {}
             for dependency in task.dependencies:
                 source = next((t for t in run.tasks if t.task_id == dependency), None)
@@ -1244,27 +1251,12 @@ class WorkflowEngine:
                 "'it works' or 'HTTP 200'.\n\nUser: "
             )
             try:
-                if interpolated_input.get("topic") == "connector_requirements":
-                    instruction += ("Answer the capability question directly. Ask which service and operation "
-                                    "the user wants. Explain that a public URL or OpenAPI definition helps, "
-                                    "private operations need scoped access via Vault, and validation precedes "
-                                    "enablement. No build was requested or executed in this step.\n")
-                    # The answer is available locally even when the provider stalls.
-                    text = await asyncio.wait_for(gemini_client.generate_text(instruction + prompt), timeout=8)
-                else:
-                    text = await gemini_client.generate_text(instruction + prompt)
+                text = await gemini_client.generate_text(instruction + prompt)
                 text = (text or "").strip()
                 if not text:
                     raise RuntimeError("The model returned an empty response")
                 return {"reply": text, "message": text}
             except Exception:
-                if interpolated_input.get("topic") == "connector_requirements" and not dependency_results:
-                    logger.warning("Model unavailable for connector requirements", exc_info=True)
-                    reply = ("Yes. Which service should the tool connect to, and what should it do? "
-                             "Share its website or API documentation URL. I can look there for an "
-                             "API definition. For a private operation, connect the required account "
-                             "through Vault. The Stamp can be enabled after validation succeeds.")
-                    return {"reply": reply, "message": reply}
                 logger.exception("Chat model failed")
                 raise
 

@@ -616,12 +616,19 @@ class PostgresMCPRepository(PostgresConnectorContract, _Base):
                                        mcp_id, [tool["tool_name"] for tool in tools])
                 for t in tools:
                     op = t.get("operation") or {}
+                    # Identity is the CANONICAL tool_name. get_cached_tools
+                    # adds a read-only "name" mirror for callers; letting the
+                    # mirror win on WRITE re-stored renamed tools under their
+                    # OLD identity — connector retests (Run Test) then
+                    # checkpointed two same-named tools and failed with
+                    # "Connector changed during browser validation".
+                    tool_identity = t.get("tool_name") or t.get("name", "")
                     await conn.execute(
                         """INSERT INTO mcp_tools (tool_name, description,
                              input_schema, mcp_id, mcp_version, discovered_at,
                              expires_at, auth_requirements, risk_level, operation_json)
                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)""",
-                        t.get("name") or t.get("tool_name", ""),
+                        tool_identity,
                         t.get("description", ""),
                         json.dumps(t.get("input_schema")
                                    or t.get("inputSchema") or {}),

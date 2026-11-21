@@ -169,8 +169,14 @@ class FirestoreMCPRepository(BaseMCPRepository):
         for t in tools:
             payload = _as_dict(t)
             payload.setdefault("mcp_id", mcp_id)
+            # Identity is the CANONICAL tool_name (postgres/sqlite parity):
+            # the read-side "name" mirror must never override it on write —
+            # a renamed tool (Run Test's readStartPage) re-stored under its
+            # OLD name made the connector checkpoint see two same-named
+            # tools and fail validation.
             tool_name = payload.get("tool_name") or payload.get("name") or "unknown"
             payload["tool_name"] = tool_name
+            payload["name"] = tool_name
             doc_id = f"{payload.get('mcp_id')}_{tool_name}"
             ref = db.collection("mcp_tools").document(doc_id)
             batch.set(ref, payload)

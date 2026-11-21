@@ -200,7 +200,11 @@ class SQLiteMCPRepository(BaseMCPRepository):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    tool.get("tool_name") or tool.get("name") or "unknown",
+                    # Identity is the CANONICAL tool_name — the read-side
+                    # "name" mirror must never override it on write (see the
+                    # postgres parity fix; renames via Run Test otherwise
+                    # re-store tools under their old identity).
+                    tool.get("tool_name") or "unknown",
                     tool.get("description", ""),
                     json.dumps(tool.get("input_schema") or tool.get("inputSchema") or {}),
                     mcp_id,

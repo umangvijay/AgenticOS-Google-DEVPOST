@@ -331,7 +331,7 @@ _STOP_NOUNS = frozenset({
 })
 
 
-def _server_from_prompt(text: str) -> Optional[Tuple[str, str]]:
+def server_from_prompt(text: str) -> Optional[Tuple[str, str]]:
     for match in re.finditer(r"https://[^\s\"'<>]+", text or ""):
         raw = match.group(0).rstrip(").,;]")
         parsed = urlparse(raw)
@@ -431,7 +431,7 @@ def sketch_openapi_from_prompt(source: str) -> Optional[str]:
     text = (source or "").strip()
     if not text:
         return None
-    inferred = _server_from_prompt(text)
+    inferred = server_from_prompt(text)
     if not inferred:
         return None
     server, title = inferred

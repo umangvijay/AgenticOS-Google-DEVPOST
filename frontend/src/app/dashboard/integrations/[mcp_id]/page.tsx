@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { getIntegration, listConnectorRevisions, checkpointConnector, restoreConnectorRevision, ConnectorRevision, enableIntegration, disableIntegration, deleteIntegration, testIntegration, attachIntegrationKey, downloadIntegrationServer, eligibilitySummary, eligibilityReasonLabel } from "@/lib/api";
@@ -71,7 +72,8 @@ export default function IntegrationDetailPage() {
     setActionError("");
     try {
       const result = await testIntegration(mcpId);
-      setTestStatus(result.status === "browser_ready" ? "The public start page opened successfully. Other proposed actions need separate validation." : result.status === "untested" ? "No safe probe was available. This integration has not been verified." : `Live test: ${result.status}`);
+      const code = result.probe?.http_status;
+      setTestStatus(result.status === "unhealthy" ? (code === 404 ? "The provider returned 404. Rebuild from its current OpenAPI URL and check the API server and operation path." : code === 401 || code === 403 ? "The provider denied access. Connect a credential with access to the operation and run the test again." : "The test did not pass. Check the endpoint and its access requirements, then retry.") : result.status === "browser_ready" ? "The public start page opened successfully. Other proposed actions need separate validation." : result.status === "untested" ? "No safe probe was available. This integration has not been verified." : `Live test: ${result.status}`);
       await load();
     } catch (err) {
       setActionError("Test failed: " + (err instanceof Error ? err.message : String(err)));
@@ -104,6 +106,8 @@ export default function IntegrationDetailPage() {
     </div>
   );
 
+  const canEnable = ["verified", "browser_ready"].includes(mcp.trust_tier) &&
+    (mcp.transport !== "internal" || (mcp.validated_tool_count ?? 0) > 0);
   return (
     <div className="animate-fade-in" data-scroll-reveal style={{ maxWidth: 900, margin: "0 auto" }}>
       
@@ -128,12 +132,13 @@ export default function IntegrationDetailPage() {
           <button className="btn btn-secondary" onClick={handleTest} disabled={testing}>
             {testing ? <span className="spinner" style={{ width: 14, height: 14 }}/> : "Run Test"}
           </button>
-          <button className={mcp.is_enabled ? "btn btn-secondary" : "btn btn-primary"} onClick={handleToggle} disabled={toggling}>
+          <button className={mcp.is_enabled ? "btn btn-secondary" : "btn btn-primary"} onClick={handleToggle} disabled={testing || toggling || (!mcp.is_enabled && !canEnable)}>
             {toggling ? "Updating…" : mcp.is_enabled ? "Disable" : "Enable"}
           </button>
         </div>
       </div>
 
+      {!mcp.is_enabled && !canEnable && <p role="note">Enable becomes available after this revision passes validation. Use Run Test. If the API path has changed, <Link href="/dashboard/integrations/create">build from the current definition</Link>.</p>}
       {testStatus && <p role="status">{testStatus}</p>}
       {mcp.operation_eligibility?.some(op => !op.allowed) && (
         <div className="glass-card" style={{ padding: 20, marginBottom: 24 }} role="note">

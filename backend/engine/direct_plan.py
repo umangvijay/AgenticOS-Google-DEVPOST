@@ -6,7 +6,7 @@ import re
 from typing import Any, List, Optional, Sequence
 
 from backend.models.schemas import TaskDefinition, WorkflowDefinition
-from backend.engine.mcp_catalog import build_input_for_app, detect_named_apps
+from backend.engine.mcp_catalog import build_input_for_app, detect_named_apps, server_from_prompt
 
 _URL = re.compile(r"https?://[^\s\"'<>]+", re.I)
 _EMAIL = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
@@ -42,7 +42,7 @@ APP_WORDS = (
 USE_AFTER_MCP = (
     "so i can", "so that i", "then ", " and then",     "use them", "use those", "use it", "use the tool", "call the", "call one",
     "list my", "get my", "fetch ", "now ", "using it", "using them", "and call",
-    "then call", "then use",
+    "then call", "then use", "and automate", "and schedule", "and use",
 )
 EMAIL_WORDS = (
     "email", "e-mail", "e mail", "send mail", "send an email", "write the email",
@@ -161,7 +161,7 @@ def _has_concrete_mcp_target(text: str, url: Optional[str] = None) -> bool:
         return True
     if _VAGUE_TARGET.search(text or ""):
         return False
-    if _FOR_TARGET.search(text or ""):
+    if _FOR_TARGET.search(re.sub(r"\bin order to\b.*", "", text or "", flags=re.I)):
         return True
     return False
 
@@ -235,29 +235,18 @@ def _mcp_tasks(text: str, url: Optional[str], prior_goal: str = "") -> List[Task
     if not website:
         from backend.mcp.website_mcp import looks_like_website_without_api
         website = looks_like_website_without_api(haystack, url)
-    method = "url" if spec_url else ("website" if website else "prompt")
+    method = ("website" if website else "url") if url else "prompt"
     source = url if method == "url" and url else haystack
     apps = detect_named_apps(haystack) if method == "prompt" else []
-    if len(apps) > 1:
-        tasks: List[TaskDefinition] = []
+    if apps:
+        tasks = []
         for i, app_id in enumerate(apps, 1):
-            payload = build_input_for_app(app_id) or {}
-            display = payload.get("name") or app_id
-            tasks.append(
-                TaskDefinition(
-                    task_id=f"mcp-{i}",
-                    agent="core.mcp_build",
-                    tool="mcp_build",
-                    input_data={
-                        "method": "prompt",
-                        "source": f"{haystack}\n\nBuild tools only for {display}.",
-                        "name": display,
-                        "auth_type": payload.get("auth_type") or "API_KEY",
-                    },
-                    timeout_seconds=180,
-                )
-            )
-        return tasks
+            payload = build_input_for_app(app_id)
+            if payload:
+                tasks.append(TaskDefinition(task_id=f"mcp-{i}", agent="core.mcp_build",
+                    tool="mcp_build", input_data=payload, timeout_seconds=180))
+        if tasks:
+            return tasks
     return [
         TaskDefinition(
             task_id="mcp-1",
@@ -317,6 +306,16 @@ def plan_from_goal(goal: str, prior_goal: str = "", catalog: Optional[Sequence[A
     text = (goal or "").strip()
     if not text:
         return None
+    # Explicitly independent built-in operations may start alongside a build.
+    independent = re.split(r"\s*(?:[,;]\s*)?(?:and\s+)?(?:in parallel|separately|simultaneously)[:,]?\s+", text, maxsplit=1, flags=re.I)
+    if len(independent) == 2 and all(independent):
+        plans = [plan_from_goal(part, catalog=catalog) for part in independent]
+        if all(plans):
+            tasks = [task for plan in plans for task in plan.tasks]
+            if (len({t.task_id for t in tasks}) == len(tasks)
+                    and all(t.agent.startswith("core.") for t in tasks)):
+                return WorkflowDefinition(tasks=tasks)
+        return None  # A compound request needs the full planner.
     mention = re.fullmatch(r"@([A-Za-z0-9_][A-Za-z0-9_.-]*)\s+(.+)", text, flags=re.DOTALL)
     if mention:
         # The worker resolves the ID against enabled plugins visible to this user.
@@ -334,6 +333,45 @@ def plan_from_goal(goal: str, prior_goal: str = "", catalog: Optional[Sequence[A
     )
     greetings = ("hi", "hello", "hey", "yo", "sup", "good morning", "good evening")
 
+    # A follow-up can supply the missing target without repeating the build verb.
+    if prior_goal and re.fullmatch(r"(?:yes[, ]+)?(?:please )?(?:you do it|do it|go ahead|build it)[.! ]*", lowered):
+        if _wants_mcp(prior_goal, url=_url(prior_goal)) and _has_concrete_mcp_target(prior_goal, _url(prior_goal)):
+            target = _url(prior_goal)
+            if target:
+                return WorkflowDefinition(tasks=_mcp_tasks("Create MCP tools for " + target, target))
+            return plan_from_goal(prior_goal, catalog=catalog)
+        if "mcp" in prior_goal.lower():
+            return WorkflowDefinition(tasks=[TaskDefinition(task_id="target-needed", agent="core.set",
+                input_data={"fields": {"reply": "Which service should the MCP tool use, and what should it do? Send its website or API documentation URL."}})])
+    if url and text.rstrip(" /.,") == url.rstrip("/") and (not prior_goal or "mcp" in prior_goal.lower()):
+        return WorkflowDefinition(tasks=_mcp_tasks("Create MCP tools for " + url, url))
+
+    # A hosted worker cannot operate a checkout on the user's device.
+    git_action = re.search(r"\b(push|pull|fetch)\b", lowered)
+    git_target = url or (_url(prior_goal) if git_action else None)
+    if (git_action and re.search(r"\b(?:git|github|gitlab|repo|repository|checkout)\b", lowered)
+            and not re.search(r"\b(?:mcp|connector|explain|what|how)\b", lowered)):
+        fields = {"reply": "Which HTTPS Git repository should I use? Send its URL and the operation (push, pull, or fetch)."}
+        if git_target and git_target.startswith("https://"):
+            branch = re.search(r"\bbranch\s+`?([\w./-]+)", text, re.I)
+            fields = {"reply": "The Git request is ready for your local checkout. Authorize it on your device.",
+                      "git_request": {"operation": git_action.group(1), "url": git_target,
+                                      "branch": branch.group(1) if branch else None}}
+        return WorkflowDefinition(tasks=[TaskDefinition(task_id="git-request", agent="core.set",
+            input_data={"fields": fields})])
+
+    mentions_connector = any(word in lowered for word in MCP_PHRASES + TOOL_PHRASES)
+    asks_requirements = bool(re.search(
+        r"\b(?:what|which)\b.{0,55}\b(?:need|required|requirements|require)\b|"
+        r"^(?:how (?:do|can|would)|what is|what are|explain)\b", lowered))
+    if mentions_connector and (asks_requirements or (
+        not _has_concrete_mcp_target(text, url) and
+        not re.search(r"\b(?:youtube|yt|github|gitlab)\b", lowered) and
+        not prior_goal and re.search(r"\b(?:any mcp|mcp(?: tools?)?$)", lowered)
+    )):
+        return WorkflowDefinition(tasks=[TaskDefinition(task_id="chat-1", agent="core.chat",
+            input_data={"prompt": text, "topic": "connector_requirements"}, timeout_seconds=60)])
+
     if lowered in greetings or lowered.startswith("hi ") or lowered.startswith("hello "):
         return WorkflowDefinition(tasks=[
             TaskDefinition(
@@ -344,7 +382,7 @@ def plan_from_goal(goal: str, prior_goal: str = "", catalog: Optional[Sequence[A
             ),
         ])
 
-    if any(p in lowered for p in help_phrases) or lowered in ("help", "?"):
+    if lowered in help_phrases or lowered == "?":
         return WorkflowDefinition(tasks=[
             TaskDefinition(
                 task_id="chat-1",
@@ -402,6 +440,9 @@ def plan_from_goal(goal: str, prior_goal: str = "", catalog: Optional[Sequence[A
     if wants_mcp:
         if _wants_use_after_mcp(text) and _catalog_covers_goal(text, catalog):
             return WorkflowDefinition(tasks=[_orchestrator_task(text)])
+        if not url and not server_from_prompt(text) and not detect_named_apps(text) and not re.search(r"\b(?:youtube|yt)\b", lowered):
+            return WorkflowDefinition(tasks=[TaskDefinition(task_id="target-needed", agent="core.set",
+                input_data={"fields": {"reply": "Send the service’s website or API documentation URL and the operation you want. I need a real target before I can build and test this tool."}})])
         tasks = _mcp_tasks(text, url, prior_goal)
         mcp_ids = [t.task_id for t in tasks]
         if _wants_use_after_mcp(text) or any(w in lowered for w in BROWSE_WORDS) or _wants_app(text):
@@ -440,6 +481,11 @@ def plan_from_goal(goal: str, prior_goal: str = "", catalog: Optional[Sequence[A
                            input_data={"url": target, "method": "GET"}, timeout_seconds=45)
             for i, target in enumerate(urls, 1)
         ])
+    if re.match(r"^(?:what|who|why|when|where|how|explain|define)\b", lowered) and not any(
+        word in lowered for word in ("latest", "search", "look up", "research", "today", "current", "my ")
+    ):
+        return WorkflowDefinition(tasks=[TaskDefinition(task_id="chat-1", agent="core.chat",
+            input_data={"prompt": text}, timeout_seconds=60)])
     # Length is not intent: short automation goals still need planning.
 
     return None

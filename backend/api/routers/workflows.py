@@ -378,12 +378,13 @@ async def create_workflow(
         from backend.engine.direct_plan import plan_from_goal
 
         tool_router = getattr(request.app.state, "tool_router", None)
-        live_catalog = await tool_router.get_tool_catalog(user.user_id) if tool_router else []
-        workflow_def = plan_from_goal(
-            goal,
-            prior_goal=(parent.get("goal") if parent else "") or "",
-            catalog=live_catalog,
-        )
+        prior_goal = (parent.get("goal") if parent else "") or ""
+        workflow_def = plan_from_goal(goal, prior_goal=prior_goal)
+        live_catalog = []
+        # Conversational turns do not require an integration inventory.
+        if tool_router and not (workflow_def and all(t.agent == "core.chat" for t in workflow_def.tasks)):
+            live_catalog = await tool_router.get_tool_catalog(user.user_id)
+            workflow_def = plan_from_goal(goal, prior_goal=prior_goal, catalog=live_catalog)
         if workflow_def:
             logger.info("[%s] Direct plan for goal (no Gemini planner)", run_id[:8])
         else:

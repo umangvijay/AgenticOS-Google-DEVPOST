@@ -103,3 +103,39 @@ test('Studio reconnects to the same job and shows the failure beside Generate', 
   await expect(card.getByRole('button', { name: 'Generate', exact: true })).toBeEnabled();
   expect(posts).toBe(1);
 });
+
+test('dashboard keeps a chosen theme and the recent-chat disclosure on reload', async ({ page }) => {
+  await fixture(page);
+  await page.goto('/');
+  await page.evaluate(() => localStorage.setItem('agentos_theme', 'dark'));
+  await page.goto('/dashboard/workflows');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  const recent = page.getByRole('button', { name: 'Recent chats' });
+  await recent.click();
+  await expect(recent).toHaveAttribute('aria-expanded', 'false');
+  await page.getByRole('button', { name: 'Switch to day theme' }).click();
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await expect(recent).toHaveAttribute('aria-expanded', 'false');
+  await recent.click();
+  await expect(recent).toHaveAttribute('aria-expanded', 'true');
+});
+
+test('a disabled stamp explains a failed 404 and only enables after a passing retest', async ({ page }) => {
+  await fixture(page);
+  let ready = false;
+  await page.route('**/api/v1/integrations/demo', route => route.fulfill({ json: {
+    mcp_id: 'demo', name: 'Demo stamp', transport: 'internal', is_enabled: false,
+    trust_tier: ready ? 'verified' : 'pending_review', validated_tool_count: ready ? 1 : 0, tools: [],
+  } }));
+  await page.route('**/api/v1/integrations/demo/revisions', route => route.fulfill({ json: { revisions: [] } }));
+  await page.route('**/api/v1/integrations/demo/test', route => route.fulfill({ json: ready ? { status: 'healthy' } : { status: 'unhealthy', probe: { http_status: 404 } } }));
+  await page.goto('/dashboard/integrations/demo');
+  const enable = page.getByRole('button', { name: 'Enable', exact: true });
+  await expect(enable).toBeDisabled();
+  await page.getByRole('button', { name: 'Run Test' }).click();
+  await expect(page.getByText(/provider returned 404/)).toBeVisible();
+  ready = true;
+  await page.getByRole('button', { name: 'Run Test' }).click();
+  await expect(enable).toBeEnabled();
+});

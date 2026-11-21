@@ -1,6 +1,7 @@
 "use client";
 
 import { useId, useState, type ReactNode } from "react";
+import RunElapsed from "@/components/RunElapsed";
 import Link from "next/link";
 import { Activity, ChevronRight, ChevronsUpDown, FileText, Folder, Link2, PanelRightClose, Plus } from "lucide-react";
 import type { WorkflowEvent, WorkflowRun } from "@/lib/api";
@@ -55,6 +56,7 @@ export default function WorkspaceExecutionCard({ turns, events, onClose, onInspe
       <div className="execution-overview"><Activity size={17} /><span role="status">{executionLabel(run?.status)}</span>
         <span className="execution-progress">{tasks.length ? `${done}/${tasks.length} steps` : ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED", "NEEDS_REVIEW"].includes(run?.status || "") ? "No steps recorded" : "Waiting for steps"}</span>
       </div>
+      {run && <RunElapsed run={run} events={runEvents} />}
       <details className="execution-section" key={`activity-${run?.run_id}`}>
         <summary><span>Activity</span><span className="execution-count">{tasks.length || runEvents.length}</span><ChevronRight size={15} className="disclosure-chevron" /></summary>
         <ExecutionTimeline events={runEvents} tasks={tasks} compact />
@@ -62,6 +64,7 @@ export default function WorkspaceExecutionCard({ turns, events, onClose, onInspe
       <details className="execution-section" open key={`outputs-${run?.run_id}`}>
         <summary><span>Outputs</span><span className="execution-count">{outputs.length}</span><ChevronRight size={15} className="disclosure-chevron" /></summary>
         {outputs.length ? <ul className="execution-resource-list">{outputs.map(task => <li key={task.task_id}>
+          {typeof task.output_data?.mcp_id === "string" && <Link href={`/dashboard/integrations/${encodeURIComponent(task.output_data.mcp_id)}`}>Open stamp</Link>}
           <a href={`#result-${run!.run_id}-${task.task_id}`} onClick={() => { if (window.matchMedia("(max-width: 1099px)").matches) onClose(); }} title="View result in conversation"><FileText size={16} /><span>{task.title || (task.agent === "core.chat" ? "Assistant response" : task.tool || "Step result")}</span><ChevronRight size={14} /></a>
         </li>)}</ul> : <p className="execution-empty">No saved outputs yet.</p>}
         <Link href="/dashboard/studio" className="execution-text-link"><Plus size={15} />Create an output</Link>

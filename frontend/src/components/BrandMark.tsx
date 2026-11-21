@@ -23,10 +23,7 @@ export default function BrandMark({ size = 28, withWordmark = true }: { size?: n
           fontWeight: 700,
           letterSpacing: "-0.02em",
           fontSize: size * 0.72,
-          background: "var(--forge-grad)",
-          WebkitBackgroundClip: "text",
-          backgroundClip: "text",
-          color: "transparent",
+          color: "var(--text-primary)",
         }}>
           Sandtable
         </span>

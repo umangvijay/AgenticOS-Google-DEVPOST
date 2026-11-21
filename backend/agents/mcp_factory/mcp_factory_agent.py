@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+from html.parser import HTMLParser
 from typing import Any, Dict, Optional
 
 import httpx
@@ -25,6 +26,27 @@ from backend.services import gemini_client
 from backend.services.gemini_client import GeminiQuotaExceeded, is_quota_error
 
 logger = logging.getLogger(__name__)
+
+
+class SpecLinks(HTMLParser):
+    """Look for explicit specification links on the supplied documentation page."""
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in {"a", "link"} or len(self.links) >= 5:
+            return
+        href = dict(attrs).get("href")
+        if not href:
+            return
+        target = urljoin(self.source, href)
+        parsed = urlparse(target)
+        if (parsed.scheme == "https" and parsed.netloc == urlparse(self.source).netloc
+                and parsed.path.lower().endswith((".json", ".yaml", ".yml"))
+                and target not in self.links):
+            self.links.append(target)
 
 
 def auth_metadata_from_spec(model, fallback_type: str = "API_KEY") -> Dict[str, str]:
@@ -347,7 +369,7 @@ class MCPFactoryAgent:
                     "Connect credentials, run validation, then enable the tested operations."
                 )
             msg = (
-                f"Built {display_name} with {len(tools)} tool{'s' if len(tools) != 1 else ''}"
+                f"{'Built' if auto_enable else 'Prepared a disabled draft for'} {display_name} with {len(tools)} tool{'s' if len(tools) != 1 else ''}"
                 + (f": {names}." if names else ".")
                 + f"\nmcp_id: {mcp_id}."
                 + auth_hint
@@ -521,17 +543,19 @@ class MCPFactoryAgent:
 
     def _parse_or_none(self, content: str):
         try:
-            self.parser.parse_text(content)
-            return content
+            model = self.parser.parse_text(content)
+            return content if model.operations and ("openapi" in self.parser.raw_spec or "swagger" in self.parser.raw_spec) else None
         except Exception:
             return None
 
-    async def _try_well_known_specs(self, source: str, logs: list, build_id: Optional[str]) -> Optional[tuple]:
+    async def _try_well_known_specs(self, source: str, logs: list, build_id: Optional[str], content: str = "") -> Optional[tuple]:
         parsed = urlparse(source)
         if not parsed.scheme or not parsed.netloc:
             return None
         base = f"{parsed.scheme}://{parsed.netloc}"
-        candidates = []
+        links = SpecLinks(source)
+        links.feed(content[:100_000])
+        candidates = links.links
         for path in (
             "/openapi.json",
             "/openapi.yaml",
@@ -544,7 +568,7 @@ class MCPFactoryAgent:
             url = urljoin(base + "/", path.lstrip("/"))
             if url.rstrip("/") != source.rstrip("/"):
                 candidates.append(url)
-        for url in candidates:
+        for url in dict.fromkeys(candidates):
             try:
                 await self._log(build_id, f"Trying spec at {url}", logs)
                 content = await self._fetch_text(url)
@@ -623,34 +647,23 @@ class MCPFactoryAgent:
             ) from last_error
         if method == "url":
             await self._log(build_id, f"Fetching {source}", logs)
-            content = await self._fetch_text(source)
-            parsed = self._parse_or_none(content)
+            try:
+                content = await self._fetch_text(source)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                content = ""
+            parsed = self._parse_or_none(content) if content else None
             if parsed:
                 return parsed, source
-            found = await self._try_well_known_specs(source, logs, build_id)
+            found = await self._try_well_known_specs(source, logs, build_id, content)
             if found:
                 return found
-            await self._log(build_id, "Fetched docs are not a raw spec; extracting OpenAPI with Gemini", logs)
-            try:
-                spec = await gemini_client.generate_json(
-                    "This page is documentation or a website for an application. Extract or construct "
-                    "a valid OpenAPI 3.0 JSON object covering the HTTP API a client would call. "
-                    "Use only https servers from the docs. Return JSON only.\n\n" + content[:80000]
-                )
-                if isinstance(spec, dict):
-                    spec = json.dumps(spec)
-                return spec, source
-            except (GeminiQuotaExceeded, Exception) as e:
-                if not (isinstance(e, GeminiQuotaExceeded) or is_quota_error(e)):
-                    raise
-                sketched = sketch_openapi_from_prompt(source or "")
-                if sketched and self._parse_or_none(sketched):
-                    await self._log(build_id, "Gemini unavailable; sketched OpenAPI from the URL and description", logs)
-                    return sketched, source
-                raise ValueError(
-                    "This URL is not an OpenAPI spec and Gemini is unavailable. "
-                    "Paste an OpenAPI JSON/YAML URL or a description of the HTTP API."
-                ) from e
+            raise ValueError(
+                "I could reach the URL but could not find a usable OpenAPI definition. "
+                "Send the provider’s OpenAPI JSON/YAML link, paste the definition, "
+                "or request a website tool to read the public start page."
+            )
         raise ValueError(f"Unknown ingest method: {method}")
 
     async def _probe(self, tool: Dict[str, Any], model) -> Dict[str, Any]:

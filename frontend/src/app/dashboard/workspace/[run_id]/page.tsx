@@ -4,6 +4,10 @@ import { useEffect, useRef, useState, CSSProperties } from "react";
 import { useParams } from "next/navigation";
 import { PanelRight, ChevronRight, SquareTerminal } from "lucide-react";
 import WorkspaceExecutionCard from "@/components/WorkspaceExecutionCard";
+import LocalGitRequest from "@/components/LocalGitRequest";
+import QueueStatusPanel from "@/components/QueueStatusPanel";
+import RunElapsed from "@/components/RunElapsed";
+import { isTerminalRun as isTerminal } from "@/lib/task-states";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
@@ -80,10 +84,6 @@ function assistantText(task: Task): string | null {
   return null;
 }
 
-function isTerminal(status?: string) {
-  return ["COMPLETED", "FAILED", "CANCELLED", "NEEDS_REVIEW", "EXPIRED"].includes(status || "");
-}
-
 function isWaitingHuman(workflow: WorkflowRun) {
   return !isTerminal(workflow.status) && (workflow.tasks || []).some((t) => t.status === "WAITING_APPROVAL");
 }
@@ -148,13 +148,18 @@ function TurnView({ workflow, events, onInspect }: { workflow: WorkflowRun; even
   return (
     <>
       <UserBubble goal={workflow.goal} />
+      {workflow.status === "PENDING" && <QueueStatusPanel state="queued" runId={workflow.run_id} />}
       {(workflow.tasks.length > 0 || events.length > 0) && <details className="turn-activity" onToggle={event => { if (event.currentTarget.open) onInspect(); }}>
-        <summary><SquareTerminal size={15} /><span>{isTerminal(workflow.status) ? "View activity" : "Working"}{workflow.tasks.length ? ` · ${workflow.tasks.length} ${workflow.tasks.length === 1 ? "step" : "steps"}` : ""}</span><ChevronRight size={14} className="disclosure-chevron" /></summary>
+        <summary><SquareTerminal size={15} /><span>{isTerminal(workflow.status) ? "View activity" : "Working"}{workflow.tasks.length ? ` · ${workflow.tasks.length} ${workflow.tasks.length === 1 ? "step" : "steps"}` : ""}<RunElapsed run={workflow} events={events} /></span><ChevronRight size={14} className="disclosure-chevron" /></summary>
         <ExecutionTimeline events={events} tasks={workflow.tasks} compact />
       </details>}
       {replies.map(({ task, text }) => (
         <div id={`result-${workflow.run_id}-${task.task_id}`} key={`${workflow.run_id}-out-${task.task_id}`} style={bubbleStyle("agent")}>
           <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 6 }}>Sandtable</div>
+          {task.task_id === "git-request" && (() => {
+            const req = task.output_data?.git_request as { operation?: string; url?: string; branch?: string } | undefined;
+            return req?.operation && req.url && <LocalGitRequest operation={req.operation} url={req.url} branch={req.branch} />;
+          })()}
           <div className="agent-markdown">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}

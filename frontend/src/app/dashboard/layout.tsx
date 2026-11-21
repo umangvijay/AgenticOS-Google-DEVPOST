@@ -136,6 +136,7 @@ function DashboardInner({ children }: { children: ReactNode }) {
   const { user, isAuthenticated, isLoading, logout } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
+  const [recentsOpen, setRecentsOpen] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -161,15 +162,17 @@ function DashboardInner({ children }: { children: ReactNode }) {
   // Apply saved theme on page load and persist for first-paint script
   useEffect(() => {
     if (!isAuthenticated) return;
+    let active = true;
     (async () => {
       try {
         const { settings } = await import("@/lib/api").then((m) => m.getSettings());
         const theme = settings?.theme || "system";
-        applyTheme((theme as ThemePref) || "system");
+        if (active && !localStorage.getItem("agentos_theme")) applyTheme(theme as ThemePref);
       } catch {
         // Default to light if settings fail to load
       }
     })();
+    return () => { active = false; };
   }, [isAuthenticated]);
 
   useEffect(() => watchSystemTheme(), []);
@@ -210,14 +213,9 @@ function DashboardInner({ children }: { children: ReactNode }) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       if (stored === "1") setCollapsed(true);
       if (stored === "0") setCollapsed(false);
+      setRecentsOpen(localStorage.getItem("sandtable_recents_open") !== "0");
     } catch { /* ignore */ }
   }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem("agentos_sidebar_collapsed", collapsed ? "1" : "0");
-    } catch { /* ignore */ }
-  }, [collapsed]);
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 1023px)");
@@ -232,7 +230,10 @@ function DashboardInner({ children }: { children: ReactNode }) {
 
   function toggleSidebar() {
     if (isMobile) setMobileOpen((v) => !v);
-    else setCollapsed((v) => !v);
+    else {
+      setCollapsed(!collapsed);
+      try { localStorage.setItem("agentos_sidebar_collapsed", collapsed ? "0" : "1"); } catch {}
+    }
   }
 
   const showLabels = isMobile ? mobileOpen : !collapsed;
@@ -411,9 +412,12 @@ function DashboardInner({ children }: { children: ReactNode }) {
           </Link>
 
           {showLabels && (
-            <div className="sidebar-section-label">Recents</div>
+            <button type="button" className="sidebar-section-label recent-toggle" aria-expanded={recentsOpen} onClick={() => {
+              setRecentsOpen(!recentsOpen);
+              try { localStorage.setItem("sandtable_recents_open", recentsOpen ? "0" : "1"); } catch {}
+            }}>Recent chats <span aria-hidden="true">{recentsOpen ? "▾" : "▸"}</span></button>
           )}
-          {showLabels && recents.slice(0, 14).map((wf) => {
+          {showLabels && recentsOpen && recents.slice(0, 14).map((wf) => {
             const threadHref = `/dashboard/workspace/${wf.thread_id || wf.run_id}`;
             return (
             <Link
@@ -427,7 +431,7 @@ function DashboardInner({ children }: { children: ReactNode }) {
             </Link>
             );
           })}
-          {showLabels && recentsError && recents.length === 0 && (
+          {showLabels && recentsOpen && recentsError && recents.length === 0 && (
             <div className="sidebar-empty" style={{ color: "var(--error)" }}>{recentsError}</div>
           )}
           {showLabels && (user?.role === "admin" || user?.role === "super_admin") && (
@@ -435,10 +439,10 @@ function DashboardInner({ children }: { children: ReactNode }) {
               <span className="truncate">🛡 Control Center</span>
             </Link>
           )}
-          {showLabels && recentsLoading && recents.length === 0 && (
+          {showLabels && recentsOpen && recentsLoading && recents.length === 0 && (
             <div className="sidebar-empty" role="status">Loading saved chats…</div>
           )}
-          {showLabels && !recentsLoading && !recentsError && recents.length === 0 && (
+          {showLabels && recentsOpen && !recentsLoading && !recentsError && recents.length === 0 && (
             <div className="sidebar-empty" role="status">
               <strong>No saved chats yet</strong>
               <span>Your runs and any planning errors will appear here.</span>

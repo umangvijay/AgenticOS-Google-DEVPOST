@@ -162,3 +162,7 @@ export function memoryUiState(record: {
   }
   return memoryStateStyle("saved");
 }
+
+export function isTerminalRun(status?: string) {
+  return ["COMPLETED", "FAILED", "CANCELLED", "NEEDS_REVIEW", "EXPIRED"].includes(status || "");
+}

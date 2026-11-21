@@ -52,6 +52,13 @@ _API_HOST_FRAGMENTS = (
 _API_PATH_FRAGMENTS = ("/api/", "/v1/", "/v2/", "/v3/", "/rest/", "/graphql")
 
 
+def looks_like_documentation_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (parsed.hostname or "").startswith(("docs.", "developer.", "developers.")) or any(
+        segment in {"docs", "api-docs", "api-reference"} for segment in parsed.path.lower().split("/")
+    )
+
+
 def looks_like_http_api_url(url: str) -> bool:
     """True when the URL is a REST/OpenAPI host, not a human website."""
     parsed = urlparse(url if "://" in (url or "") else f"https://{url}")
@@ -82,7 +89,7 @@ def looks_like_website_without_api(source: str, url: Optional[str] = None) -> bo
         u = target.lower()
         if u.endswith((".json", ".yaml", ".yml")) or "/openapi" in u or "/swagger" in u or "/api-docs" in u:
             return False
-        if looks_like_http_api_url(target):
+        if looks_like_http_api_url(target) or looks_like_documentation_url(target):
             return False
         fragment = target.split("#", 1)[1] if "#" in target else ""
         if fragment.strip("/"):

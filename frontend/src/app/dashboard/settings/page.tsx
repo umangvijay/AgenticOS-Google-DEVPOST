@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { getSettings, updateSettings, UserSettings, storeCredential, validateCredential, pingGemini, listAdminUsers, setUserActive, adminStats } from "@/lib/api";
 import ApiKeyManager from "@/components/ApiKeyManager";
 import TokenStatusCard from "@/components/TokenStatusCard";
-import { applyTheme, type ThemePref } from "@/lib/theme";
+import { applyTheme, readThemePref, type ThemePref } from "@/lib/theme";
 import { useAuth } from "@/lib/auth-context";
 import ModelSelector from "@/components/ModelSelector";
 import type { ModelCatalog } from "@/lib/api";
@@ -72,7 +72,8 @@ export default function SettingsPage() {
         if (!active) return;
         setAvailableModels(available_models || []);
         setModelCatalog(model_catalog);
-        setSettings(s);
+        setSettings(s && localStorage.getItem("agentos_theme")
+          ? { ...s, theme: readThemePref() } : s ?? null);
       } catch (err) {
         if (active) setLoadError(err instanceof Error ? err.message : "Please try again in a moment.");
       } finally {

@@ -117,7 +117,7 @@ test.describe("admission & queue states", () => {
     await composer.locator("textarea").fill("Build me a workflow for pokemon data");
     await composer.locator("button[type=submit]").click();
 
-    const notice = page.getByRole("alert");
+    const notice = page.getByRole("alert").filter({ hasText: "Too many requests" });
     await expect(notice).toBeVisible();
     await expect(notice.getByText("Too many requests")).toBeVisible();
     // Real backend timing is shown — 37s from the stubbed decision body.
@@ -143,7 +143,7 @@ test.describe("admission & queue states", () => {
     await composer.locator("textarea").fill("another goal");
     await composer.locator("button[type=submit]").click();
 
-    const notice = page.getByRole("alert");
+    const notice = page.getByRole("alert").filter({ hasText: "Can't safely start new work" });
     await expect(notice).toBeVisible();
     await expect(notice.getByText("Can't safely start new work")).toBeVisible();
     await expect(notice.getByText(/rate limit/i)).toHaveCount(0);
@@ -164,11 +164,12 @@ test.describe("admission & queue states", () => {
     const composer = page.locator("form.chat-composer");
     await composer.locator("textarea").fill("retry me");
     await composer.locator("button[type=submit]").click();
-    await expect(page.getByRole("alert")).toBeVisible();
+    const notice = page.getByRole("alert").filter({ hasText: "Too many requests" });
+    await expect(notice).toBeVisible();
 
     // Next POST succeeds: the Retry button resubmits the SAME draft.
     state.acceptedRun = true;
-    await page.getByRole("alert").getByRole("button", { name: "Retry" }).click();
+    await notice.getByRole("button", { name: "Retry" }).click();
 
     // Workspace navigation happened (run accepted) — the rate-limit notice
     // is gone (other components may legitimately use role="alert", so the

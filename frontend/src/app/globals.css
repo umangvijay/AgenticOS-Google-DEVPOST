@@ -2160,3 +2160,7 @@ details[open] > summary > .disclosure-chevron { transform: rotate(90deg); }
 .mcp-howto[open] > summary { margin-bottom: 14px; }
 .dashboard-shell .chat-thread > *,
 .dashboard-shell .send-orb:not(:disabled) { animation: none; }
+
+button.recent-toggle { display:flex; align-items:center; justify-content:space-between; width:100%; background:transparent; border:0; color:var(--text-secondary); cursor:pointer; }
+button.recent-toggle:hover { color:var(--text-primary); }
+.run-elapsed { font-variant-numeric:tabular-nums; color:var(--text-secondary); }

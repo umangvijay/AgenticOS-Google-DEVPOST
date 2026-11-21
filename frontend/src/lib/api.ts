@@ -264,6 +264,7 @@ export interface Integration {
   name: string;
   description?: string;
   trust_tier: string;
+  transport?: string;
   is_enabled: boolean;
   health?: string;
   tool_count: number;
@@ -661,7 +662,7 @@ export async function getIntegrationBuild(buildId: string, signal?: AbortSignal)
 }
 
 export async function testIntegration(mcpId: string) {
-  return apiFetch<{ status: string }>(`/integrations/${mcpId}/test`, { method: "POST" });
+  return apiFetch<{ status: string; probe?: { http_status?: number; reason?: string } }>(`/integrations/${mcpId}/test`, { method: "POST" });
 }
 
 export async function enableIntegration(mcpId: string) {

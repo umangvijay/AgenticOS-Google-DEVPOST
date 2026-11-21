@@ -129,6 +129,7 @@ class FirestoreDeliverableRepository:
                          content_checksum: Optional[str] = None,
                          actor: str = "system") -> Deliverable:
         from backend.models.deliverable import LIFECYCLE_STATES
+        from google.cloud import firestore as fs_types
         if target not in LIFECYCLE_STATES:
             raise ValueError(f"unknown lifecycle state '{target}'")
         db = await self._get_db()

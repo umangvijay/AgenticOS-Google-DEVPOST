@@ -1249,7 +1249,10 @@ class WorkflowEngine:
                                     "the user wants. Explain that a public URL or OpenAPI definition helps, "
                                     "private operations need scoped access via Vault, and validation precedes "
                                     "enablement. No build was requested or executed in this step.\n")
-                text = await gemini_client.generate_text(instruction + prompt)
+                    # The answer is available locally even when the provider stalls.
+                    text = await asyncio.wait_for(gemini_client.generate_text(instruction + prompt), timeout=8)
+                else:
+                    text = await gemini_client.generate_text(instruction + prompt)
                 text = (text or "").strip()
                 if not text:
                     raise RuntimeError("The model returned an empty response")
